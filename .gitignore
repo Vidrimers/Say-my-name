@@ -1,0 +1,17 @@
+#folders
+temp/
+tasks/
+__pycache__/
+app/__pycache__/
+app/tasks/
+assets/
+venv/
+
+#files
+app/config.json
+*.pyc
+*.pyo
+*.wav
+*.log
+.DS_Store
+Thumbs.db
