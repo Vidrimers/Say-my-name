@@ -98,6 +98,7 @@ def schedule_window_icon(widget, icon_path: Path) -> None:
 import i18n
 from i18n import t
 import model_manager as mm
+import version as app_version
 
 DEFAULT_CONFIG = {
     "hotkey": "ctrl+alt+space",
@@ -731,6 +732,7 @@ class App(ctk.CTk):
         self.after(100, lambda: self.on_log("info", t("log_ready")))
         # poll hold-mode stop flags on the UI thread
         self.after(50, _poll_hold_stop)
+        self.after(800, self._maybe_check_updates)
         if not mm.is_downloaded(CFG.get("model", "small")):
             threading.Thread(target=_load_model, daemon=True).start()
         else:
@@ -754,7 +756,15 @@ class App(ctk.CTk):
             anchor="w",
             text_color=T["text"],
         )
-        self.lbl_title.pack(fill="x")
+        self.lbl_title.pack(side="left")
+        self.lbl_version = ctk.CTkLabel(
+            head,
+            text=app_version.__version__,
+            font=ctk.CTkFont(family=BODY, size=11),
+            anchor="e",
+            text_color=T["faint"],
+        )
+        self.lbl_version.pack(side="right", padx=(8, 0))
         self.lbl_tag = ctk.CTkLabel(
             head,
             text=t("tagline"),
@@ -903,7 +913,59 @@ class App(ctk.CTk):
             text_color=T["faint"],
             font=ctk.CTkFont(family=BODY, size=10),
         )
-        self.foot.pack(pady=(4, 12))
+        self.foot.pack(pady=(4, 2))
+
+        row = ctk.CTkFrame(self, fg_color="transparent")
+        row.pack(pady=(0, 10))
+        self.btn_support = ctk.CTkButton(
+            row,
+            text=t("footer_support"),
+            height=24,
+            corner_radius=0,
+            fg_color="transparent",
+            hover_color=T["panel"],
+            text_color=T["muted"],
+            border_width=0,
+            font=ctk.CTkFont(family=BODY, size=11),
+            command=self.open_support,
+        )
+        self.btn_support.pack(side="left", padx=(0, 6))
+        self.btn_license = ctk.CTkButton(
+            row,
+            text=t("footer_license"),
+            height=24,
+            corner_radius=0,
+            fg_color="transparent",
+            hover_color=T["panel"],
+            text_color=T["muted"],
+            border_width=0,
+            font=ctk.CTkFont(family=BODY, size=11),
+            command=self.open_license,
+        )
+        self.btn_license.pack(side="left")
+
+    def _maybe_check_updates(self) -> None:
+        """Once per day, check quietly if a newer version exists."""
+        state_file = APP_DIR / "update_state.json"
+        if not app_version.should_check(state_file):
+            return
+
+        def worker() -> None:
+            try:
+                remote = app_version.fetch_latest()
+                app_version.mark_checked(state_file)
+                if app_version.is_newer(remote):
+                    _emit("warn", "update_available", remote=remote)
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def open_support(self) -> None:
+        SupportWindow(self)
+
+    def open_license(self) -> None:
+        LicenseWindow(self)
 
     # ---- log / status ----
 
@@ -971,6 +1033,8 @@ class App(ctk.CTk):
         self.lbl_log.configure(text=t("btn_log"))
         self.btn_clear.configure(text=t("btn_clear"))
         self.foot.configure(text=t("footer"))
+        self.btn_support.configure(text=t("footer_support"))
+        self.btn_license.configure(text=t("footer_license"))
         self.btn_settings.configure(text=t("btn_settings"))
         self.btn_compact.configure(text=t("btn_compact"))
         self.set_status(self._status_mode)
@@ -1343,6 +1407,34 @@ class SettingsWindow(ctk.CTkToplevel):
             self.chk_compact.select()
         self.chk_compact.pack(anchor="w", padx=24, pady=8)
 
+        # --- Updates ---
+        section(t("set_updates"), 6)
+        upd_row = ctk.CTkFrame(outer, fg_color="transparent")
+        upd_row.pack(fill="x", padx=24, pady=(10, 4))
+        self.btn_upd = ctk.CTkButton(
+            upd_row,
+            text=t("set_check_updates"),
+            width=160,
+            height=32,
+            corner_radius=0,
+            fg_color=T["panel"],
+            hover_color="#243038",
+            border_width=1,
+            border_color=T["line"],
+            text_color=T["text"],
+            font=ctk.CTkFont(family=BODY, size=11),
+            command=self._check_updates,
+        )
+        self.btn_upd.pack(side="left")
+        self.lbl_upd = ctk.CTkLabel(
+            upd_row,
+            text=f"{app_version.__version__}",
+            anchor="w",
+            text_color=T["muted"],
+            font=ctk.CTkFont(family=BODY, size=11),
+        )
+        self.lbl_upd.pack(side="left", padx=12)
+
         # --- Buttons ---
         btns = ctk.CTkFrame(outer, fg_color="transparent")
         btns.pack(fill="x", padx=24, pady=(22, 12))
@@ -1372,6 +1464,30 @@ class SettingsWindow(ctk.CTkToplevel):
             font=ctk.CTkFont(family=DISPLAY, size=12, weight="bold"),
             command=self._save,
         ).pack(side="right")
+
+    def _check_updates(self) -> None:
+        def worker() -> None:
+            self.after(0, lambda: self.lbl_upd.configure(text=t("update_checking")))
+            try:
+                remote = app_version.fetch_latest()
+                app_version.mark_checked(APP_DIR / "update_state.json")
+                if app_version.is_newer(remote):
+                    msg = t("update_available", remote=remote)
+                    color = T["amber"]
+                else:
+                    msg = t("update_current")
+                    color = T["muted"]
+            except Exception:
+                msg = t("update_failed")
+                color = T["faint"]
+            def done() -> None:
+                self.lbl_upd.configure(text=msg, text_color=color)
+            try:
+                self.after(0, done)
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _hk_label(self) -> str:
         if self._capturing_hotkey:
@@ -1628,6 +1744,284 @@ class SettingsWindow(ctk.CTkToplevel):
                     self.app.compact.update_idletasks()
             except Exception:
                 pass
+
+
+class SupportWindow(ctk.CTkToplevel):
+    """Support the author — wallet list with copy / open links (same as yaroPhotoSort)."""
+
+    WALLETS = [
+        {
+            "name": "DonationAlerts",
+            "address": "https://dalink.to/v1drimers",
+            "link": "https://dalink.to/v1drimers",
+            "color": "#e64553",
+        },
+        {
+            "name": "Kaspa",
+            "address": "kaspa:qzdkq9n6p0rgp7fg3cyhuq4uznfy6a4csh5jcqt4gs355zyf3r3t2eszhhc9c",
+            "link": None,
+            "color": "#70c7ba",
+        },
+        {
+            "name": "TON",
+            "address": "UQB6VnvZJXUfq3CW-xS6ku38t3fIK7RJ30a5TMTGJiJal8tr",
+            "link": None,
+            "color": "#0088cc",
+        },
+        {
+            "name": "USDT (TRC-20)",
+            "address": "TYYvAa7u8agTheFHoJK6sGqPV2E6UJd6Er",
+            "link": None,
+            "color": "#26a17b",
+        },
+    ]
+
+    def __init__(self, app: "App") -> None:
+        super().__init__(app)
+        self.app = app
+        self.title(t("support_title"))
+        self.geometry("440x480")
+        self.resizable(False, False)
+        self.configure(fg_color=T["bg"])
+        try:
+            self.transient(app)
+            self.grab_set()
+        except Exception:
+            pass
+
+        head = ctk.CTkLabel(
+            self,
+            text=t("support_title"),
+            font=ctk.CTkFont(family=DISPLAY, size=18, weight="bold"),
+            text_color=T["text"],
+        )
+        head.pack(padx=24, pady=(22, 12), anchor="w")
+
+        body = ctk.CTkScrollableFrame(self, fg_color="transparent", corner_radius=0)
+        body.pack(fill="both", expand=True, padx=20, pady=(0, 12))
+
+        for w in self.WALLETS:
+            self._wallet_row(body, w)
+
+        btns = ctk.CTkFrame(self, fg_color="transparent")
+        btns.pack(fill="x", padx=24, pady=(4, 16))
+        ctk.CTkButton(
+            btns,
+            text=t("support_close"),
+            width=110,
+            height=36,
+            corner_radius=0,
+            fg_color=T["panel"],
+            hover_color="#243038",
+            border_width=1,
+            border_color=T["line"],
+            text_color=T["text"],
+            font=ctk.CTkFont(family=BODY, size=12),
+            command=self._close,
+        ).pack(side="right")
+
+    def _wallet_row(self, parent, w: dict) -> None:
+        row = ctk.CTkFrame(
+            parent, fg_color=T["panel"], corner_radius=0,
+            border_width=1, border_color=T["line"],
+        )
+        row.pack(fill="x", pady=(0, 8))
+
+        stripe = ctk.CTkLabel(
+            row, text="", width=4, fg_color=w["color"], corner_radius=0
+        )
+        stripe.pack(side="left", fill="y", padx=(0, 12), pady=10)
+
+        col = ctk.CTkFrame(row, fg_color="transparent")
+        col.pack(side="left", fill="both", expand=True, padx=(0, 12), pady=10)
+
+        ctk.CTkLabel(
+            col,
+            text=w["name"],
+            font=ctk.CTkFont(family=DISPLAY, size=13, weight="bold"),
+            text_color=T["text"],
+            anchor="w",
+        ).pack(fill="x")
+        addr = w["address"]
+        display = addr if len(addr) <= 36 else addr[:18] + "…" + addr[-14:]
+        ctk.CTkLabel(
+            col,
+            text=display,
+            font=ctk.CTkFont(family=BODY, size=11),
+            text_color=T["muted"],
+            anchor="w",
+        ).pack(fill="x", pady=(2, 0))
+
+        actions = ctk.CTkFrame(row, fg_color="transparent")
+        actions.pack(side="right", padx=12)
+
+        def copy_addr() -> None:
+            try:
+                import pyperclip
+
+                pyperclip.copy(w["address"])
+                self.app.on_log("ok", t("support_copied"))
+            except Exception:
+                pass
+
+        ctk.CTkButton(
+            actions,
+            text=t("support_copy"),
+            width=110,
+            height=28,
+            corner_radius=0,
+            fg_color="transparent",
+            hover_color=T["line"],
+            border_width=1,
+            border_color=T["line"],
+            text_color=T["text"],
+            font=ctk.CTkFont(family=BODY, size=11),
+            command=copy_addr,
+        ).pack(side="left", padx=(0, 6))
+
+        if w.get("link"):
+            def open_link() -> None:
+                import webbrowser
+
+                webbrowser.open(w["link"])
+
+            ctk.CTkButton(
+                actions,
+                text=t("support_open"),
+                width=80,
+                height=28,
+                corner_radius=0,
+                fg_color=w["color"],
+                hover_color=T["faint"],
+                text_color="#FFFFFF",
+                font=ctk.CTkFont(family=BODY, size=11),
+                command=open_link,
+            ).pack(side="left")
+
+    def _close(self) -> None:
+        try:
+            self.grab_release()
+        except Exception:
+            pass
+        self.destroy()
+
+
+class LicenseWindow(ctk.CTkToplevel):
+    """CC BY-NC-ND 4.0 summary like the design: ✓ allowed, ✗ not allowed."""
+
+    def __init__(self, app: "App") -> None:
+        super().__init__(app)
+        self.app = app
+        self.title(t("license_title"))
+        self.geometry("440x420")
+        self.resizable(False, False)
+        self.configure(fg_color=T["bg"])
+        try:
+            self.transient(app)
+            self.grab_set()
+        except Exception:
+            pass
+
+        head = ctk.CTkLabel(
+            self,
+            text=t("license_title"),
+            font=ctk.CTkFont(family=DISPLAY, size=18, weight="bold"),
+            text_color=T["text"],
+        )
+        head.pack(padx=24, pady=(22, 10), anchor="w")
+
+        ctk.CTkLabel(
+            self,
+            text=t("license_name"),
+            font=ctk.CTkFont(family=DISPLAY, size=15, weight="bold"),
+            text_color=T["text"],
+            anchor="w",
+        ).pack(fill="x", padx=24)
+        ctk.CTkLabel(
+            self,
+            text=t("license_full_name"),
+            font=ctk.CTkFont(family=BODY, size=11),
+            text_color=T["muted"],
+            anchor="w",
+            wraplength=390,
+            justify="left",
+        ).pack(fill="x", padx=24, pady=(4, 14))
+
+        rows = [
+            ("✓", "#2F9E44", t("license_ok_free"), True),
+            ("✓", "#2F9E44", t("license_ok_share"), True),
+            ("✗", "#E03131", t("license_no_commercial"), False),
+            ("✗", "#E03131", t("license_no_derivatives"), False),
+        ]
+        for mark, color, label, _ok in rows:
+            row = ctk.CTkFrame(self, fg_color="transparent")
+            row.pack(fill="x", padx=24, pady=3)
+            ctk.CTkLabel(
+                row,
+                text=mark,
+                width=22,
+                font=ctk.CTkFont(family=DISPLAY, size=16, weight="bold"),
+                text_color=color,
+            ).pack(side="left")
+            ctk.CTkLabel(
+                row,
+                text=label,
+                font=ctk.CTkFont(family=BODY, size=12),
+                text_color=T["text"],
+                anchor="w",
+            ).pack(side="left", padx=(8, 0))
+
+        ctk.CTkLabel(
+            self,
+            text=t("license_note"),
+            font=ctk.CTkFont(family=BODY, size=11),
+            text_color=T["faint"],
+            anchor="w",
+            wraplength=390,
+            justify="left",
+        ).pack(fill="x", padx=24, pady=(16, 0))
+
+        btns = ctk.CTkFrame(self, fg_color="transparent")
+        btns.pack(fill="x", padx=24, pady=(18, 16))
+
+        def open_full() -> None:
+            import webbrowser
+
+            webbrowser.open("https://github.com/Vidrimers/Say-my-name/blob/main/LICENSE")
+
+        ctk.CTkButton(
+            btns,
+            text=t("license_full_text"),
+            width=120,
+            height=36,
+            corner_radius=0,
+            fg_color=T["panel"],
+            hover_color="#243038",
+            border_width=1,
+            border_color=T["line"],
+            text_color=T["text"],
+            font=ctk.CTkFont(family=BODY, size=12),
+            command=open_full,
+        ).pack(side="left")
+        ctk.CTkButton(
+            btns,
+            text=t("license_ok_btn"),
+            width=110,
+            height=36,
+            corner_radius=0,
+            fg_color=T["red"],
+            hover_color="#D92222",
+            text_color="#FFFFFF",
+            font=ctk.CTkFont(family=DISPLAY, size=12, weight="bold"),
+            command=self._close,
+        ).pack(side="right")
+
+    def _close(self) -> None:
+        try:
+            self.grab_release()
+        except Exception:
+            pass
+        self.destroy()
 
 
 def _norm_mod(name: str) -> str:
