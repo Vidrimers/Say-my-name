@@ -99,6 +99,12 @@ STRINGS: dict[str, dict[str, str]] = {
         "update_available": "New version available: {remote}",
         "update_failed": "Could not check for updates",
         "update_checking": "Checking…",
+        "update_do": "Update",
+        "update_done": "Restarting after update",
+        "update_later": "Later",
+        "update_skip": "Skip this version",
+        "update_dialog_title": "New version available",
+        "update_dialog_text": "New version {remote} is available (you have {local}).",
     },
     "ru": {
         "app_title": "SAY MY NAME",
@@ -196,6 +202,12 @@ STRINGS: dict[str, dict[str, str]] = {
         "update_available": "Доступна новая версия: {remote}",
         "update_failed": "Не удалось проверить обновления",
         "update_checking": "Проверка…",
+        "update_do": "Обновить",
+        "update_done": "Перезапуск после обновления",
+        "update_later": "Позже",
+        "update_skip": "Пропустить эту версию",
+        "update_dialog_title": "Доступна новая версия",
+        "update_dialog_text": "Доступна новая версия {remote} (у вас {local}).",
     },
 }
 

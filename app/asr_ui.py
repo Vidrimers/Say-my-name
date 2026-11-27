@@ -714,6 +714,7 @@ class App(ctk.CTk):
         self.settings = None
         self.compact: CompactWindow | None = None
         self._status_mode = "idle"
+        self._pending_update = None
 
         self._build_header()
         self._build_status()
@@ -769,6 +770,7 @@ class App(ctk.CTk):
             text_color=T["faint"],
         )
         self.lbl_version.pack(side="right")
+        self.lbl_version.bind("<Button-1>", self._on_version_click)
 
         # row 2: tagline under the title
         self.lbl_tag = ctk.CTkLabel(
@@ -958,14 +960,46 @@ class App(ctk.CTk):
 
         def worker() -> None:
             try:
-                remote = app_version.fetch_latest()
+                remote, zip_url = app_version.fetch_latest()
                 app_version.mark_checked(state_file)
-                if app_version.is_newer(remote):
+                if remote and app_version.is_newer(remote) and self._update_allowed(remote):
                     _emit("warn", "update_available", remote=remote)
+                    self.after(0, lambda: self._set_update_available(remote, zip_url))
             except Exception:
                 pass
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _update_allowed(self, remote: str) -> bool:
+        return str(CFG.get("skip_version", "")) != str(remote)
+
+    def _set_update_available(self, remote: str, zip_url: str | None) -> None:
+        self._pending_update = (remote, zip_url)
+        self._blink_version(True)
+        try:
+            self.lbl_version.configure(cursor="hand2")
+        except Exception:
+            pass
+
+    def _blink_version(self, on: bool) -> None:
+        if not getattr(self, "_pending_update", None):
+            try:
+                self.lbl_version.configure(text_color=T["faint"])
+            except Exception:
+                pass
+            return
+        color = T["amber"] if on else T["faint"]
+        try:
+            self.lbl_version.configure(text_color=color)
+        except Exception:
+            pass
+        self.after(500, lambda: self._blink_version(not on))
+
+    def _on_version_click(self, _event=None) -> None:
+        pending = getattr(self, "_pending_update", None)
+        if not pending:
+            return
+        UpdateDialog(self, pending[0], pending[1])
 
     def open_support(self) -> None:
         SupportWindow(self)
@@ -1475,8 +1509,27 @@ class SettingsWindow(ctk.CTkToplevel):
         def worker() -> None:
             self.after(0, lambda: self.lbl_upd.configure(text=t("update_checking")))
             try:
-                remote = app_version.fetch_latest()
+                remote, zip_url = app_version.fetch_latest()
                 app_version.mark_checked(APP_DIR / "update_state.json")
+                if app_version.is_newer(remote) and zip_url:
+                    msg = t("update_available", remote=remote)
+                    color = T["amber"]
+
+                    def to_update() -> None:
+                        self.lbl_upd.configure(text=msg, text_color=color)
+                        self.btn_upd.configure(
+                            text=t("update_do"),
+                            fg_color=T["red"],
+                            hover_color="#D92222",
+                            text_color="#FFFFFF",
+                            command=lambda: self._do_update(zip_url),
+                        )
+
+                    try:
+                        self.after(0, to_update)
+                    except Exception:
+                        pass
+                    return
                 if app_version.is_newer(remote):
                     msg = t("update_available", remote=remote)
                     color = T["amber"]
@@ -1494,6 +1547,15 @@ class SettingsWindow(ctk.CTkToplevel):
                 pass
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _do_update(self, zip_url: str) -> None:
+        self.lbl_upd.configure(text=t("update_done"), text_color=T["amber"])
+        try:
+            app_version.run_updater(zip_url, APP_DIR.parent)
+        except Exception:
+            self.lbl_upd.configure(text=t("update_failed"), text_color=T["faint"])
+            return
+        self.after(400, self.app.on_close)
 
     def _hk_label(self) -> str:
         if self._capturing_hotkey:
@@ -2050,6 +2112,111 @@ class LicenseWindow(ctk.CTkToplevel):
             font=ctk.CTkFont(family=DISPLAY, size=12, weight="bold"),
             command=self._close,
         ).pack(side="right")
+
+    def _close(self) -> None:
+        try:
+            self.grab_release()
+        except Exception:
+            pass
+        self.destroy()
+
+
+class UpdateDialog(ctk.CTkToplevel):
+    """New version available: Update / Later / Skip this version."""
+
+    def __init__(self, app: "App", remote: str, zip_url: str | None) -> None:
+        super().__init__(app)
+        self.app = app
+        self.remote = remote
+        self.zip_url = zip_url
+        self.title(t("update_dialog_title"))
+        self.geometry("400x220")
+        self.resizable(False, False)
+        self.configure(fg_color=T["bg"])
+        try:
+            self.transient(app)
+            self.grab_set()
+        except Exception:
+            pass
+
+        ctk.CTkLabel(
+            self,
+            text=t("update_dialog_title"),
+            font=ctk.CTkFont(family=DISPLAY, size=16, weight="bold"),
+            text_color=T["text"],
+        ).pack(padx=24, pady=(22, 8), anchor="w")
+        ctk.CTkLabel(
+            self,
+            text=t("update_dialog_text", remote=remote, local=app_version.__version__),
+            font=ctk.CTkFont(family=BODY, size=12),
+            text_color=T["muted"],
+            wraplength=350,
+            justify="left",
+        ).pack(fill="x", padx=24, pady=(0, 18))
+
+        row = ctk.CTkFrame(self, fg_color="transparent")
+        row.pack(fill="x", padx=24, pady=(0, 18))
+
+        ctk.CTkButton(
+            row,
+            text=t("update_later"),
+            height=34,
+            corner_radius=0,
+            fg_color="transparent",
+            hover_color=T["panel"],
+            border_width=1,
+            border_color=T["line"],
+            text_color=T["text"],
+            font=ctk.CTkFont(family=BODY, size=12),
+            command=self._close,
+        ).pack(side="left")
+
+        ctk.CTkButton(
+            row,
+            text=t("update_skip"),
+            height=34,
+            corner_radius=0,
+            fg_color="transparent",
+            hover_color=T["panel"],
+            border_width=1,
+            border_color=T["line"],
+            text_color=T["muted"],
+            font=ctk.CTkFont(family=BODY, size=12),
+            command=self._skip,
+        ).pack(side="left", padx=(8, 0))
+
+        ctk.CTkButton(
+            row,
+            text=t("update_do"),
+            height=34,
+            corner_radius=0,
+            fg_color=T["red"],
+            hover_color="#D92222",
+            text_color="#FFFFFF",
+            font=ctk.CTkFont(family=DISPLAY, size=12, weight="bold"),
+            command=self._update,
+        ).pack(side="right")
+
+    def _skip(self) -> None:
+        CFG["skip_version"] = self.remote
+        save_config(CFG)
+        self.app._pending_update = None
+        try:
+            self.app._blink_version(False)
+            self.app.lbl_version.configure(text_color=T["faint"], cursor="")
+        except Exception:
+            pass
+        self._close()
+
+    def _update(self) -> None:
+        if not self.zip_url:
+            self._close()
+            return
+        try:
+            app_version.run_updater(self.zip_url, APP_DIR.parent)
+        except Exception:
+            pass
+        self.after(300, self.app.on_close)
 
     def _close(self) -> None:
         try:
