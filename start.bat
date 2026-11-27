@@ -3,6 +3,24 @@ chcp 65001 >nul
 title SAY MY NAME
 cd /d "%~dp0"
 
+REM --- required files ---
+if not exist "app\asr_ui.py" goto :missing
+if not exist "app\requirements.txt" goto :missing
+if not exist "start.vbs" goto :missing
+if not exist "make_lnk.ps1" goto :missing
+goto :files_ok
+
+:missing
+echo.
+echo ERROR: some application files are missing.
+echo Download the latest zip from:
+echo   https://github.com/Vidrimers/Say-my-name/releases
+echo and extract it into this folder.
+echo.
+pause
+exit /b 1
+
+:files_ok
 REM --- Python: use py launcher if present, else python ---
 set "PY="
 py -3 -c "import sys" >nul 2>nul
@@ -22,6 +40,10 @@ exit /b 1
 echo Using: %PY%
 
 if not exist "venv\Scripts\python.exe" goto :make_venv
+
+echo Checking packages...
+venv\Scripts\python.exe -m pip install -r app
+equirements.txt >nul 2>nul
 goto :deps_done
 
 :make_venv
@@ -42,6 +64,6 @@ if errorlevel 1 (
 )
 
 :deps_done
-powershell -NoProfile -ExecutionPolicy Bypass -File tools\make_lnk.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File make_lnk.ps1
 start "" venv\Scripts\pythonw.exe app\asr_ui.py
 exit /b 0

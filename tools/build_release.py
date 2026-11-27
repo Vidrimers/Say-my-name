@@ -14,7 +14,7 @@ INCLUDE = [
     "start.bat",
     "run_ui.bat",
     "run_ui_debug.bat",
-    "tools",
+    "make_lnk.ps1",
 ]
 
 EXCLUDE_DIRS = {

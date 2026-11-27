@@ -1,12 +1,28 @@
+$ErrorActionPreference = 'Stop'
+$root = $PSScriptRoot
 $ws = New-Object -ComObject WScript.Shell
-$root = 'C:\Users\vidri\Downloads\asrMimo'
-$lnkPath = Join-Path $root 'SAY MY NAME.lnk'
-$lnk = $ws.CreateShortcut($lnkPath)
-$lnk.TargetPath = 'C:\Windows\System32\wscript.exe'
-$lnk.Arguments = '"' + (Join-Path $root 'start.vbs') + '"'
-$lnk.WorkingDirectory = $root
-$lnk.IconLocation = (Join-Path $root 'app\app.ico') + ',0'
-$lnk.Description = 'SAY MY NAME (Whisper) silent launch'
-$lnk.Save()
-Write-Output ("lnk ok -> " + $lnkPath)
-Write-Output ("args: " + $lnk.Arguments)
+$target = 'C:\Windows\System32\wscript.exe'
+$arg = '"' + (Join-Path $root 'start.vbs') + '"'
+$icon = (Join-Path $root 'app\app.ico') + ',0'
+$desc = 'SAY MY NAME (Whisper) silent launch'
+
+function Make-Lnk($path) {
+    $lnk = $ws.CreateShortcut($path)
+    $lnk.TargetPath = $target
+    $lnk.Arguments = $arg
+    $lnk.WorkingDirectory = $root
+    $lnk.IconLocation = $icon
+    $lnk.Description = $desc
+    $lnk.Save()
+    Write-Output "lnk -> $path"
+}
+
+Make-Lnk (Join-Path $root 'SAY MY NAME.lnk')
+
+# Desktop (handles OneDrive redirect)
+$desktop = [Environment]::GetFolderPath('Desktop')
+if ($desktop -and (Test-Path $desktop)) {
+    Make-Lnk (Join-Path $desktop 'SAY MY NAME.lnk')
+} else {
+    Write-Output 'desktop not found'
+}
