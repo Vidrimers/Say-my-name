@@ -1012,13 +1012,14 @@ class App(ctk.CTk):
             text_color=T["muted"],
         )
         self._mon_mark.pack(side="left", padx=(12, 6), pady=8)
-        ctk.CTkLabel(
+        self._mon_title = ctk.CTkLabel(
             head,
             text=t("mon_title"),
             font=ctk.CTkFont(family=DISPLAY, size=12, weight="bold"),
             text_color=T["text"],
             anchor="w",
-        ).pack(side="left", fill="x", expand=True, pady=8)
+        )
+        self._mon_title.pack(side="left", fill="x", expand=True, pady=8)
 
         body = ctk.CTkFrame(wrap, fg_color="transparent")
         self._mon_body = body
@@ -1057,14 +1058,17 @@ class App(ctk.CTk):
             ("cpu", t("mon_cpu_load")),
             ("ram", t("mon_ram")),
         ]
+        self._mon_title_labels = {}
         for i, (key, title) in enumerate(rows):
             row = ctk.CTkFrame(grid, fg_color="transparent")
             row.pack(fill="x", padx=12, pady=2)
-            ctk.CTkLabel(
+            lbl = ctk.CTkLabel(
                 row, text=title, anchor="w",
                 font=ctk.CTkFont(family=BODY, size=11), text_color=T["muted"],
                 width=140,
-            ).pack(side="left")
+            )
+            lbl.pack(side="left")
+            self._mon_title_labels[key] = lbl
             val = ctk.CTkLabel(
                 row, text="…", anchor="w",
                 font=ctk.CTkFont(family=BODY, size=11), text_color=T["text"],
@@ -1451,6 +1455,24 @@ class App(ctk.CTk):
         self.btn_support.configure(text=t("footer_support"))
         self.btn_license.configure(text=t("footer_license"))
         self.btn_feedback.configure(text=t("footer_feedback"))
+        # system monitor
+        try:
+            self._mon_title.configure(text=t("mon_title"))
+            titles = {
+                "model": t("mon_model"),
+                "gpu_mem": t("mon_gpu_mem"),
+                "gpu_util": t("mon_gpu_util"),
+                "gpu_temp": t("mon_gpu_temp"),
+                "gpu_power": t("mon_gpu_power"),
+                "cpu": t("mon_cpu_load"),
+                "ram": t("mon_ram"),
+            }
+            for key, label in getattr(self, "_mon_title_labels", {}).items():
+                if key in titles:
+                    label.configure(text=titles[key])
+            self._refresh_monitor()
+        except Exception:
+            pass
         self.btn_settings.configure(text=t("btn_settings"))
         self.btn_compact.configure(text=t("btn_compact"))
         self.set_status(self._status_mode)
