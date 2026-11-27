@@ -10,6 +10,7 @@ venv/
 
 #files
 tools/release.bat
+SAY MY NAME.lnk
 tools/bump_version.py
 app/config.json
 *.pyc
