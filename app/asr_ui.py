@@ -148,6 +148,7 @@ import i18n
 from i18n import t
 import model_manager as mm
 import version as app_version
+import gpu_info
 
 DEFAULT_CONFIG = {
     "hotkey": "ctrl+alt+space",
@@ -159,6 +160,8 @@ DEFAULT_CONFIG = {
     "max_record_seconds": 60,
     "device": "auto",
     "compute_type": "auto",
+    "monitor_open": False,
+    "device_choice": "auto",
     "topmost": False,
     "compact_on_start": False,
 }
@@ -179,6 +182,15 @@ def save_config(cfg: dict) -> None:
 
 
 CFG = load_config()
+
+def _default_device_choice() -> str:
+    if not CFG.get("device_choice") or CFG.get("device_choice") == "auto":
+        if gpu_info.has_nvidia() and gpu_info.nvidia_series_ok(gpu_info.gpu_name()):
+            return "gpu"
+        return "cpu"
+    return CFG.get("device_choice")
+
+CFG["device_choice"] = _default_device_choice()
 i18n.set_lang(CFG.get("ui_language", "en"))
 
 _state = {
@@ -207,15 +219,12 @@ def _load_model():
     from faster_whisper import WhisperModel
 
     model_size = CFG.get("model", "small")
-    device = CFG.get("device", "auto")
+    choice = CFG.get("device_choice", "cpu")
+    if choice == "gpu" and gpu_info.has_nvidia():
+        device = "cuda"
+    else:
+        device = "cpu"
     compute = CFG.get("compute_type", "auto")
-    if device == "auto":
-        try:
-            import ctranslate2
-
-            device = "cuda" if ctranslate2.get_cuda_device_count() > 0 else "cpu"
-        except Exception:
-            device = "cpu"
     if compute == "auto":
         compute = "float16" if device == "cuda" else "int8"
     _emit("info", "log_model_loading", model=model_size, device=device, compute=compute)
@@ -720,6 +729,49 @@ class CompactWindow:
             pass
 
 
+class ScrollFrame(ctk.CTkFrame):
+    """Plain scroll area: scrollbar shown only when content does not fit."""
+
+    def __init__(self, master) -> None:
+        super().__init__(master, fg_color=T["bg"], corner_radius=0)
+        import tkinter as tk
+
+        self.canvas = tk.Canvas(self, highlightthickness=0, bd=0, bg=T["bg"])
+        self.vsb = ctk.CTkScrollbar(self, orientation="vertical", command=self.canvas.yview)
+        self.inner = ctk.CTkFrame(self.canvas, fg_color=T["bg"], corner_radius=0)
+        self._win = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
+
+        self.inner.bind(
+            "<Configure>",
+            lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")),
+        )
+        self.canvas.configure(yscrollcommand=self.vsb.set)
+        self.canvas.pack(side="left", fill="both", expand=True)
+
+        # mouse wheel
+        self.canvas.bind("<Enter>", lambda e: self.canvas.bind_all("<MouseWheel>", self._on_wheel))
+        self.canvas.bind("<Leave>", lambda e: self.canvas.unbind_all("<MouseWheel>"))
+
+    def _on_wheel(self, event) -> None:
+        self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+    def fit_scrollbar(self) -> None:
+        try:
+            self.update_idletasks()
+            need = self.inner.winfo_reqheight()
+            have = self.canvas.winfo_height()
+            if need > have:
+                self.vsb.pack(side="right", fill="y")
+            else:
+                self.vsb.pack_forget()
+                self.canvas.yview_moveto(0)
+            self.update_idletasks()
+            # stretch inner width
+            self.canvas.itemconfigure(self._win, width=max(1, self.canvas.winfo_width()))
+        except Exception:
+            pass
+
+
 class App(ctk.CTk):
     def __init__(self) -> None:
         super().__init__()
@@ -730,9 +782,9 @@ class App(ctk.CTk):
 
         self.title(t("app_title"))
         # 125% DPI: 480×640 logical → 600×800 physical on screen
-        self.geometry("480x640")
-        self.minsize(480, 640)
-        self.maxsize(480, 640)
+        self.geometry("480x720")
+        self.minsize(480, 720)
+        self.maxsize(480, 720)
         self.resizable(False, False)
         # hide maximize / disable zoom button on Windows
         try:
@@ -765,11 +817,16 @@ class App(ctk.CTk):
         self._status_mode = "idle"
         self._pending_update = None
 
+        # footer always on top of pack order with side=bottom -> stays visible
+        self._build_footer()
+        self._content = ScrollFrame(self)
+        self._content.pack(fill="both", expand=True)
         self._build_header()
         self._build_status()
         self._build_controls()
+        self._build_monitor()
         self._build_log()
-        self._build_footer()
+        self.after(150, self._fit_scrollbar)
 
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.attributes("-topmost", bool(CFG.get("topmost", False)))
@@ -797,7 +854,7 @@ class App(ctk.CTk):
     # ---- build ----
 
     def _build_header(self) -> None:
-        head = ctk.CTkFrame(self, fg_color="transparent")
+        head = ctk.CTkFrame(self._content.inner, fg_color="transparent")
         head.pack(fill="x", padx=28, pady=(26, 4))
 
         # row 1: title left, version right
@@ -834,7 +891,7 @@ class App(ctk.CTk):
     def _build_status(self) -> None:
         # status as a signal rail: 3px left bar + text (no card)
         self.status_card = ctk.CTkFrame(
-            self, fg_color=T["panel"], corner_radius=0,
+            self._content.inner, fg_color=T["panel"], corner_radius=0,
             border_width=1, border_color=T["line"],
         )
         self.status_card.pack(fill="x", padx=28, pady=(18, 12))
@@ -875,7 +932,7 @@ class App(ctk.CTk):
     def _build_controls(self) -> None:
         # primary record: full-width console button
         self.btn_rec = ctk.CTkButton(
-            self,
+            self._content.inner,
             text=t("btn_record"),
             height=48,
             corner_radius=0,
@@ -887,7 +944,7 @@ class App(ctk.CTk):
         )
         self.btn_rec.pack(fill="x", padx=28, pady=(0, 8))
 
-        row = ctk.CTkFrame(self, fg_color="transparent")
+        row = ctk.CTkFrame(self._content.inner, fg_color="transparent")
         row.pack(fill="x", padx=28, pady=(0, 4))
 
         self.btn_compact = ctk.CTkButton(
@@ -920,9 +977,149 @@ class App(ctk.CTk):
         )
         self.btn_settings.pack(side="left", expand=True, fill="x")
 
+    def _build_monitor(self) -> None:
+        # collapsible system monitor (remembers open/closed in config)
+        wrap = ctk.CTkFrame(self._content.inner, fg_color="transparent")
+        wrap.pack(fill="x", padx=28, pady=(8, 0))
+
+        head = ctk.CTkFrame(
+            wrap, fg_color=T["panel"], corner_radius=0,
+            border_width=1, border_color=T["line"],
+        )
+        head.pack(fill="x")
+        self._mon_open = bool(CFG.get("monitor_open", False))
+        self._mon_mark = ctk.CTkLabel(
+            head,
+            text="−" if self._mon_open else "+",
+            width=18,
+            font=ctk.CTkFont(family=DISPLAY, size=14, weight="bold"),
+            text_color=T["muted"],
+        )
+        self._mon_mark.pack(side="left", padx=(12, 6), pady=8)
+        ctk.CTkLabel(
+            head,
+            text=t("mon_title"),
+            font=ctk.CTkFont(family=DISPLAY, size=12, weight="bold"),
+            text_color=T["text"],
+            anchor="w",
+        ).pack(side="left", fill="x", expand=True, pady=8)
+
+        body = ctk.CTkFrame(wrap, fg_color="transparent")
+        self._mon_body = body
+
+        def toggle_mon() -> None:
+            self._mon_open = not self._mon_open
+            if self._mon_open:
+                body.pack(fill="x", pady=(2, 4))
+                self._mon_mark.configure(text="−")
+            else:
+                body.pack_forget()
+                self._mon_mark.configure(text="+")
+            CFG["monitor_open"] = self._mon_open
+            try:
+                save_config(CFG)
+            except Exception:
+                pass
+            self.after(50, self._fit_scrollbar)
+
+        for wdg in (head, self._mon_mark):
+            wdg.bind("<Button-1>", lambda _e: toggle_mon())
+        for child in head.winfo_children():
+            if child is not self._mon_mark:
+                child.bind("<Button-1>", lambda _e: toggle_mon())
+
+        grid = ctk.CTkFrame(body, fg_color=T["panel"], corner_radius=0,
+                            border_width=1, border_color=T["line"])
+        grid.pack(fill="x", pady=(2, 0))
+        self._mon_labels = {}
+        rows = [
+            ("model", t("mon_model")),
+            ("gpu_mem", t("mon_gpu_mem")),
+            ("gpu_util", t("mon_gpu_util")),
+            ("gpu_temp", t("mon_gpu_temp")),
+            ("gpu_power", t("mon_gpu_power")),
+            ("cpu", t("mon_cpu_load")),
+            ("ram", t("mon_ram")),
+        ]
+        for i, (key, title) in enumerate(rows):
+            row = ctk.CTkFrame(grid, fg_color="transparent")
+            row.pack(fill="x", padx=12, pady=2)
+            ctk.CTkLabel(
+                row, text=title, anchor="w",
+                font=ctk.CTkFont(family=BODY, size=11), text_color=T["muted"],
+                width=140,
+            ).pack(side="left")
+            val = ctk.CTkLabel(
+                row, text="…", anchor="w",
+                font=ctk.CTkFont(family=BODY, size=11), text_color=T["text"],
+            )
+            val.pack(side="left", fill="x", expand=True)
+            self._mon_labels[key] = val
+
+        if self._mon_open:
+            body.pack(fill="x", pady=(2, 4))
+
+        self.after(300, self._refresh_monitor)
+        self.after(2000, self._monitor_loop)
+
+    def _refresh_monitor(self) -> None:
+        use_gpu = CFG.get("device_choice", "cpu") == "gpu"
+        L = self._mon_labels
+        L["model"].configure(text=f"{CFG.get('model')} / {'GPU' if use_gpu else 'CPU'}")
+
+        if use_gpu and gpu_info.has_nvidia():
+            try:
+                m = gpu_info.gpu_metrics()
+                used = m["used_mb"] / 1024
+                total = m["total_mb"] / 1024
+                L["gpu_mem"].configure(text=f"{used:.2f} / {total:.1f} {t('mon_gb')}")
+                L["gpu_util"].configure(
+                    text=f"{m['util']:.0f}%" if m["util"] is not None else t("mon_na")
+                )
+                L["gpu_temp"].configure(
+                    text=f"{m['temp']:.0f}°C" if m["temp"] is not None else t("mon_na")
+                )
+                L["gpu_power"].configure(
+                    text=f"{m['power_w']:.0f} W" if m["power_w"] is not None else t("mon_na")
+                )
+            except Exception:
+                for k in ("gpu_mem", "gpu_util", "gpu_temp", "gpu_power"):
+                    L[k].configure(text=t("mon_na"))
+        else:
+            for k in ("gpu_mem", "gpu_util", "gpu_temp", "gpu_power"):
+                L[k].configure(text=t("mon_na"))
+
+        pct, used_gb = gpu_info.cpu_ram()
+        cl = gpu_info.cpu_load()
+        L["cpu"].configure(
+            text=f"{cl:.0f}%" if cl is not None else t("mon_na")
+        )
+        L["ram"].configure(
+            text=f"{pct:.0f}% ({used_gb:.1f} {t('mon_gb')})"
+            if pct is not None
+            else t("mon_na")
+        )
+
+    def _monitor_loop(self) -> None:
+        try:
+            if self._mon_open:
+                self._refresh_monitor()
+        except Exception:
+            pass
+        try:
+            self.after(2000, self._monitor_loop)
+        except Exception:
+            pass
+
+    def _fit_scrollbar(self) -> None:
+        try:
+            self._content.fit_scrollbar()
+        except Exception:
+            pass
+
     def _build_log(self) -> None:
-        wrap = ctk.CTkFrame(self, fg_color="transparent")
-        wrap.pack(fill="both", expand=True, padx=28, pady=(16, 8))
+        wrap = ctk.CTkFrame(self._content.inner, fg_color="transparent")
+        wrap.pack(fill="x", padx=28, pady=(8, 8))
 
         top = ctk.CTkFrame(wrap, fg_color="transparent")
         top.pack(fill="x", pady=(0, 8))
@@ -960,20 +1157,23 @@ class App(ctk.CTk):
             corner_radius=0,
             wrap="word",
         )
-        self.log.pack(fill="both", expand=True)
+        self.log.pack(fill="x")
         self.log.configure(state="disabled")
 
     def _build_footer(self) -> None:
+        foot_wrap = ctk.CTkFrame(self, fg_color=T["panel"], corner_radius=0)
+        foot_wrap.pack(side="bottom", fill="x", padx=0, pady=0)
+
         self.foot = ctk.CTkLabel(
-            self,
+            foot_wrap,
             text=t("footer"),
             text_color=T["faint"],
             font=ctk.CTkFont(family=BODY, size=10),
         )
-        self.foot.pack(pady=(4, 2))
+        self.foot.pack(pady=(8, 2))
 
-        row = ctk.CTkFrame(self, fg_color="transparent")
-        row.pack(pady=(0, 10))
+        row = ctk.CTkFrame(foot_wrap, fg_color="transparent")
+        row.pack(pady=(0, 8))
         self.btn_support = ctk.CTkButton(
             row,
             text=t("footer_support"),
@@ -1415,6 +1615,71 @@ class SettingsWindow(ctk.CTkToplevel):
             font=ctk.CTkFont(family=BODY, size=11),
         )
         self.lbl_model_state.pack(side="left", padx=10)
+
+        self.lbl_vram = ctk.CTkLabel(
+            mod,
+            text="",
+            anchor="w",
+            text_color=T["muted"],
+            font=ctk.CTkFont(family=BODY, size=11),
+        )
+        self.lbl_vram.pack(fill="x", padx=14, pady=(2, 2))
+
+        ctk.CTkLabel(
+            mod,
+            text=t("set_device"),
+            anchor="w",
+            font=ctk.CTkFont(family=DISPLAY, size=12, weight="bold"),
+            text_color=T["muted"],
+        ).pack(fill="x", padx=14, pady=(10, 4))
+
+        self._device_var = ctk.StringVar(value=CFG.get("device_choice", "cpu"))
+        nvidia = gpu_info.has_nvidia()
+        self.rad_gpu = ctk.CTkRadioButton(
+            mod,
+            text=t("device_gpu"),
+            variable=self._device_var,
+            value="gpu",
+            font=ctk.CTkFont(family=BODY, size=12),
+            text_color=T["text"],
+            fg_color=T["red"],
+        )
+        self.rad_gpu.pack(anchor="w", padx=14, pady=2)
+        self.rad_cpu = ctk.CTkRadioButton(
+            mod,
+            text=t("device_cpu"),
+            variable=self._device_var,
+            value="cpu",
+            font=ctk.CTkFont(family=BODY, size=12),
+            text_color=T["text"],
+            fg_color=T["red"],
+        )
+        self.rad_cpu.pack(anchor="w", padx=14, pady=2)
+
+        if not nvidia:
+            self.rad_gpu.configure(state="disabled", text_color=T["faint"])
+            tip = ctk.CTkLabel(
+                mod,
+                text=t("device_gpu_tooltip"),
+                text_color=T["faint"],
+                font=ctk.CTkFont(family=BODY, size=10),
+                wraplength=360,
+                justify="left",
+            )
+            tip.pack(fill="x", padx=28, pady=(0, 6))
+
+        def _vram_text() -> str:
+            name = self.cmb_model.get()
+            est = gpu_info.VRAM_ESTIMATE_GB.get(name, 1.0)
+            return f"{t('set_model_vram')}: ~{est:g} {t('mon_gb')}"
+
+        self.lbl_vram.configure(text=_vram_text())
+
+        def _on_model_change2(choice: str) -> None:
+            self._on_model_change(choice)
+            self.lbl_vram.configure(text=_vram_text())
+
+        self.cmb_model.configure(command=_on_model_change2)
 
         d_row = ctk.CTkFrame(mod, fg_color="transparent")
         d_row.pack(fill="x", padx=14, pady=(4, 2))
@@ -1897,6 +2162,7 @@ class SettingsWindow(ctk.CTkToplevel):
         CFG["language"] = speech_lang
         CFG["ui_language"] = ui_lang
         CFG["max_record_seconds"] = new_max
+        CFG["device_choice"] = self._device_var.get()
         CFG["topmost"] = bool(self.chk_top.get())
         CFG["compact_on_start"] = bool(self.chk_compact.get())
         save_config(CFG)
@@ -1985,20 +2251,20 @@ class SupportWindow(ctk.CTkToplevel):
             pass
 
         head = ctk.CTkLabel(
-            self,
+            self._content,
             text=t("support_title"),
             font=ctk.CTkFont(family=DISPLAY, size=18, weight="bold"),
             text_color=T["text"],
         )
         head.pack(padx=24, pady=(22, 12), anchor="w")
 
-        body = ctk.CTkFrame(self, fg_color="transparent")
+        body = ctk.CTkFrame(self._content, fg_color="transparent")
         body.pack(fill="both", expand=True, padx=20, pady=(0, 12))
 
         for w in self.WALLETS:
             self._wallet_row(body, w)
 
-        btns = ctk.CTkFrame(self, fg_color="transparent")
+        btns = ctk.CTkFrame(self._content, fg_color="transparent")
         btns.pack(fill="x", padx=24, pady=(4, 16))
         ctk.CTkButton(
             btns,
@@ -2147,7 +2413,7 @@ class LicenseWindow(ctk.CTkToplevel):
             pass
 
         head = ctk.CTkLabel(
-            self,
+            self._content,
             text=t("license_title"),
             font=ctk.CTkFont(family=DISPLAY, size=18, weight="bold"),
             text_color=T["text"],
@@ -2155,14 +2421,14 @@ class LicenseWindow(ctk.CTkToplevel):
         head.pack(padx=24, pady=(22, 10), anchor="w")
 
         ctk.CTkLabel(
-            self,
+            self._content,
             text=t("license_name"),
             font=ctk.CTkFont(family=DISPLAY, size=15, weight="bold"),
             text_color=T["text"],
             anchor="w",
         ).pack(fill="x", padx=24)
         ctk.CTkLabel(
-            self,
+            self._content,
             text=t("license_full_name"),
             font=ctk.CTkFont(family=BODY, size=11),
             text_color=T["muted"],
@@ -2178,7 +2444,7 @@ class LicenseWindow(ctk.CTkToplevel):
             ("✗", "#E03131", t("license_no_derivatives"), False),
         ]
         for mark, color, label, _ok in rows:
-            row = ctk.CTkFrame(self, fg_color="transparent")
+            row = ctk.CTkFrame(self._content, fg_color="transparent")
             row.pack(fill="x", padx=24, pady=3)
             ctk.CTkLabel(
                 row,
@@ -2196,7 +2462,7 @@ class LicenseWindow(ctk.CTkToplevel):
             ).pack(side="left", padx=(8, 0))
 
         ctk.CTkLabel(
-            self,
+            self._content,
             text=t("license_note"),
             font=ctk.CTkFont(family=BODY, size=11),
             text_color=T["faint"],
@@ -2205,7 +2471,7 @@ class LicenseWindow(ctk.CTkToplevel):
             justify="left",
         ).pack(fill="x", padx=24, pady=(16, 0))
 
-        btns = ctk.CTkFrame(self, fg_color="transparent")
+        btns = ctk.CTkFrame(self._content, fg_color="transparent")
         btns.pack(fill="x", padx=24, pady=(18, 16))
 
         def open_full() -> None:
@@ -2267,13 +2533,13 @@ class UpdateDialog(ctk.CTkToplevel):
             pass
 
         ctk.CTkLabel(
-            self,
+            self._content,
             text=t("update_dialog_title"),
             font=ctk.CTkFont(family=DISPLAY, size=16, weight="bold"),
             text_color=T["text"],
         ).pack(padx=24, pady=(22, 8), anchor="w")
         ctk.CTkLabel(
-            self,
+            self._content,
             text=t("update_dialog_text", remote=remote, local=app_version.__version__),
             font=ctk.CTkFont(family=BODY, size=12),
             text_color=T["muted"],
@@ -2281,7 +2547,7 @@ class UpdateDialog(ctk.CTkToplevel):
             justify="left",
         ).pack(fill="x", padx=24, pady=(0, 18))
 
-        row = ctk.CTkFrame(self, fg_color="transparent")
+        row = ctk.CTkFrame(self._content, fg_color="transparent")
         row.pack(fill="x", padx=24, pady=(0, 18))
 
         ctk.CTkButton(
