@@ -14,25 +14,25 @@ INCLUDE = [
     "start.bat",
     "run_ui.bat",
     "run_ui_debug.bat",
-    "run.bat",
-    "make_lnk.ps1",
-    "SAY MY NAME.lnk",
+    "tools",
 ]
 
 EXCLUDE_DIRS = {
     "__pycache__",
     ".git",
-    "img",
     "tasks",
     "venv",
-    "assets",
 }
-EXCLUDE_EXT = {".pyc", ".pyo", ".log", ".wav"}
+EXCLUDE_ROOT = {"img", "assets", "dist"}
+EXCLUDE_EXT = {".pyc", ".pyo", ".log", ".wav", ".png"}
 EXCLUDE_NAMES = {
     "config.json",
     "update_state.json",
     "hold_debug.log",
     "hold_diag.log",
+    "release.bat",
+    "bump_version.py",
+    "write_release_bat.py",
 }
 
 
@@ -62,11 +62,15 @@ def build(out_dir: Path | None = None) -> Path:
                 if not path.is_file():
                     continue
                 rel = path.relative_to(ROOT)
+                if rel.parts and rel.parts[0] in EXCLUDE_ROOT:
+                    continue
                 if any(part in EXCLUDE_DIRS for part in rel.parts):
                     continue
                 if path.suffix.lower() in EXCLUDE_EXT:
                     continue
                 if path.name in EXCLUDE_NAMES:
+                    continue
+                if rel.as_posix() == "tools/app.ico":
                     continue
                 zf.write(path, rel.as_posix())
     print("built", out, out.stat().st_size, "bytes")
