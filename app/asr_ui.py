@@ -649,17 +649,53 @@ class CompactWindow:
         )
 
     def _on_context(self, event) -> None:
+        """Right-click menu: main, settings, hotkey mode (synced), exit."""
         import tkinter as tk
 
         menu = tk.Menu(
-            self.win, tearoff=0, bg=T["panel"], fg=T["text"],
-            activebackground=T["line"], activeforeground=T["text"],
-            borderwidth=1, relief="solid",
+            self.win,
+            tearoff=0,
+            bg=T["panel"],
+            fg=T["text"],
+            activebackground=T["line"],
+            activeforeground=T["text"],
+            borderwidth=1,
+            relief="solid",
         )
         menu.add_command(label=t("ctx_open_main"), command=self.app.show_main)
         menu.add_command(label=t("ctx_settings"), command=self._menu_settings)
         menu.add_separator()
+
+        mode = CFG.get("hotkey_mode", "toggle")
+        hk = CFG.get("hotkey", "ctrl+space")
+
+        def pick(m: str) -> None:
+            if CFG.get("hotkey_mode", "toggle") == m:
+                return
+            CFG["hotkey_mode"] = m
+            save_config(CFG)
+            try:
+                register_hotkey(CFG.get("hotkey", "ctrl+space"), m)
+            except Exception:
+                pass
+            self.app.on_log("info", t("log_hotkey_mode", mode=t("mode_toggle") if m == "toggle" else t("mode_hold")))
+
+        # checked item shows hotkey in parentheses
+        toggle_txt = t("mode_toggle")
+        hold_txt = t("mode_hold")
+        if mode == "toggle":
+            toggle_txt = f"{t('mode_toggle')} ({hk})"
+        else:
+            hold_txt = f"{t('mode_hold')} ({hk})"
+
+        menu.add_command(label=("✓ " if mode == "toggle" else "    ") + toggle_txt,
+                         command=lambda: pick("toggle"))
+        menu.add_command(label=("✓ " if mode == "hold" else "    ") + hold_txt,
+                         command=lambda: pick("hold"))
+
+        menu.add_separator()
         menu.add_command(label=t("ctx_exit"), command=self.app.on_close)
+
         try:
             menu.tk_popup(event.x_root, event.y_root)
         finally:
