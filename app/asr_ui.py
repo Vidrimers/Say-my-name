@@ -2524,6 +2524,7 @@ class FeedbackWindow(ctk.CTkToplevel):
             env = (
                 f"Версия: {ver}\n"
                 f"Windows: {win}\n"
+                f"Экран: {gpu_info.screen_info()}\n"
                 f"Устройство: {dev}\n"
                 f"Модель: {model}\n"
             )
@@ -2552,6 +2553,7 @@ class FeedbackWindow(ctk.CTkToplevel):
             env = (
                 f"Version: {ver}\n"
                 f"Windows: {win}\n"
+                f"Screen: {gpu_info.screen_info()}\n"
                 f"Device: {dev}\n"
                 f"Model: {model}\n"
             )

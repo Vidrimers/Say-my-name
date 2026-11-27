@@ -173,3 +173,22 @@ def cpu_name() -> str:
         return platform.processor() or "CPU"
     except Exception:
         return "CPU"
+
+
+def screen_info() -> str:
+    """e.g. 2560x1440 @ 125%"""
+    try:
+        import ctypes
+
+        user32 = ctypes.windll.user32
+        w = user32.GetSystemMetrics(0)
+        h = user32.GetSystemMetrics(1)
+        dpi = 96
+        try:
+            dpi = user32.GetDpiForSystem()
+        except Exception:
+            pass
+        scale = round(dpi / 96 * 100)
+        return f"{w}x{h} @ {scale}%"
+    except Exception:
+        return ""
