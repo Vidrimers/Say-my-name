@@ -166,6 +166,7 @@ DEFAULT_CONFIG = {
     "close_to_tray": False,
     "autostart_win": False,
     "journal_enable": True,
+    "processes": [],
     "silence_sec": 2.0,
     "device_choice": "auto",
     "topmost": False,
@@ -208,6 +209,7 @@ _state = {
     "ui": None,
     "model_name_loaded": None,
     "stop_requested": False,
+    "held_prekey": None,
 }
 
 
@@ -307,6 +309,7 @@ def _start_recording() -> None:
         return
     if _state["recording"]:
         return
+    _send_prekey()
     _state["recording"] = True
     _state["frames"] = []
     t = threading.Thread(target=_record_worker, daemon=True)
@@ -383,6 +386,7 @@ def _stop_and_process() -> None:
         _emit("text", text)
         _paste_text(text)
         _journal_append(text)
+        _release_prekey()
         _emit("ok", "log_pasted", dt=dt)
     except Exception as e:
         _emit("error", "log_err", err=str(e))
@@ -391,6 +395,7 @@ def _stop_and_process() -> None:
             tb = traceback.format_exc(limit=3)
             ui.after(0, ui.on_log, "error", tb)
     finally:
+        _release_prekey()
         _state["busy"] = False
         if ui is not None:
             ui.after(0, ui.set_status, "rec" if _state["recording"] else "idle")
@@ -398,6 +403,148 @@ def _stop_and_process() -> None:
 
 def on_hotkey() -> None:
     toggle_record()
+
+
+def _exe_icon(exe_path: str):
+    """CTkImage (24px) from exe icon on Windows."""
+    try:
+        from PIL import Image
+        import sys as _sys
+
+        if _sys.platform != "win32" or not exe_path or not Path(exe_path).exists():
+            return None
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        SHGFI_ICON = 0x000000100
+        SHGFI_SMALLICON = 0x000000001
+        hinst = ctypes.windll.shell32
+
+        class SHFILEINFOW(ctypes.Structure):
+            _fields_ = [
+                ("hIcon", wintypes.HICON),
+                ("iIcon", ctypes.c_int),
+                ("dwAttributes", wintypes.DWORD),
+                ("szDisplayName", ctypes.c_wchar * 260),
+                ("szTypeName", ctypes.c_wchar * 80),
+            ]
+
+        shinfo = SHFILEINFOW()
+        ok = hinst.SHGetFileInfoW(
+            str(exe_path),
+            0,
+            ctypes.byref(shinfo),
+            ctypes.sizeof(shinfo),
+            SHGFI_ICON | SHGFI_SMALLICON,
+        )
+        if not ok or not shinfo.hIcon:
+            return None
+
+        # draw icon into 24x24 RGBA via GetIconInfo + DrawIconEx on mem DC
+        class ICONINFO(ctypes.Structure):
+            _fields_ = [
+                ("fIcon", wintypes.BOOL),
+                ("xHotspot", wintypes.DWORD),
+                ("yHotspot", wintypes.DWORD),
+                ("hbmMask", wintypes.HBITMAP),
+                ("hbmColor", wintypes.HBITMAP),
+            ]
+
+        ii = ICONINFO()
+        user32.GetIconInfo(shinfo.hIcon, ctypes.byref(ii))
+
+        hdc = user32.GetDC(0)
+        mem = ctypes.windll.gdi32.CreateCompatibleDC(hdc)
+        bmp = ctypes.windll.gdi32.CreateCompatibleBitmap(hdc, 24, 24)
+        old = ctypes.windll.gdi32.SelectObject(mem, bmp)
+        # fill background transparent-ish
+        user32.DrawIconEx(mem, 0, 0, shinfo.hIcon, 24, 24, 0, 0, 0x0003)
+
+        class BITMAPINFOHEADER(ctypes.Structure):
+            _fields_ = [
+                ("biSize", wintypes.DWORD),
+                ("biWidth", ctypes.c_long),
+                ("biHeight", ctypes.c_long),
+                ("biPlanes", wintypes.WORD),
+                ("biBitCount", wintypes.WORD),
+                ("biCompression", wintypes.DWORD),
+                ("biSizeImage", wintypes.DWORD),
+                ("biXPelsPerMeter", ctypes.c_long),
+                ("biYPelsPerMeter", ctypes.c_long),
+                ("biClrUsed", wintypes.DWORD),
+                ("biClrImportant", wintypes.DWORD),
+            ]
+
+        bi = BITMAPINFOHEADER()
+        bi.biSize = ctypes.sizeof(BITMAPINFOHEADER)
+        bi.biWidth = 24
+        bi.biHeight = -24
+        bi.biPlanes = 1
+        bi.biBitCount = 32
+        buf = ctypes.create_string_buffer(24 * 24 * 4)
+        ctypes.windll.gdi32.GetDIBits(mem, bmp, 0, 24, buf, ctypes.byref(bi), 0)
+
+        ctypes.windll.gdi32.SelectObject(mem, old)
+        ctypes.windll.gdi32.DeleteObject(bmp)
+        ctypes.windll.gdi32.DeleteDC(mem)
+        user32.ReleaseDC(0, hdc)
+        user32.DestroyIcon(shinfo.hIcon)
+
+        im = Image.frombuffer("RGBA", (24, 24), buf.raw, "raw", "BGRA", 0, 1)
+        return __import__("customtkinter").CTkImage(
+            light_image=im, dark_image=im, size=(24, 24)
+        )
+    except Exception:
+        return None
+
+
+def _exe_at(x: int, y: int) -> str:
+    """exe path of window at screen coords."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        pt = wintypes.POINT(int(x), int(y))
+        hwnd = user32.WindowFromPoint(pt)
+        if not hwnd:
+            return ""
+        GA_ROOT = 2
+        root_hwnd = user32.GetAncestor(hwnd, GA_ROOT)
+        hwnd = root_hwnd or hwnd
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if not pid.value:
+            return ""
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        h = ctypes.windll.kernel32.OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value
+        )
+        try:
+            buf = ctypes.create_unicode_buffer(512)
+            size = wintypes.DWORD(512)
+            ok = ctypes.windll.kernel32.QueryFullProcessImageNameW(
+                h, 0, buf, ctypes.byref(size)
+            )
+            return buf.value if ok else ""
+        finally:
+            if h:
+                ctypes.windll.kernel32.CloseHandle(h)
+    except Exception:
+        return ""
+
+
+def _exe_under_cursor() -> str:
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        pt = wintypes.POINT()
+        ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
+        return _exe_at(pt.x, pt.y)
+    except Exception:
+        return ""
 
 
 def _foreground_process_name() -> str:
@@ -424,6 +571,50 @@ def _foreground_process_name() -> str:
                 ctypes.windll.kernel32.CloseHandle(h)
     except Exception:
         return "unknown.exe"
+
+
+def _match_process(exe_name: str) -> dict | None:
+    """Find enabled process config by exe file name."""
+    if not exe_name:
+        return None
+    for proc in CFG.get("processes") or []:
+        if not proc.get("enabled", True):
+            continue
+        name = proc.get("name") or Path(proc.get("exe", "")).name
+        if name.lower() == exe_name.lower():
+            return proc
+    return None
+
+
+def _send_prekey() -> None:
+    """If focused window is a configured process, send its key first."""
+    _state["held_prekey"] = None
+    try:
+        target = _foreground_process_name()
+        proc = _match_process(target)
+        if not proc:
+            return
+        key = (proc.get("key") or "").strip()
+        if not key:
+            return
+        if proc.get("key_mode", "press") == "hold":
+            keyboard.press(key)
+            _state["held_prekey"] = key
+        else:
+            keyboard.send(key)
+    except Exception:
+        pass
+
+
+def _release_prekey() -> None:
+    key = _state.get("held_prekey")
+    if not key:
+        return
+    try:
+        keyboard.release(key)
+    except Exception:
+        pass
+    _state["held_prekey"] = None
 
 
 def _journal_append(text: str) -> None:
@@ -1156,6 +1347,21 @@ class App(ctk.CTk):
         )
         self.btn_compact.pack(side="left", expand=True, fill="x", padx=(0, 6))
 
+        self.btn_proc = ctk.CTkButton(
+            row,
+            text=self._proc_label(),
+            height=40,
+            corner_radius=0,
+            font=ctk.CTkFont(family=BODY, size=13),
+            fg_color="transparent",
+            hover_color=T["panel"],
+            border_width=1,
+            border_color=T["line"],
+            text_color=T["text"],
+            command=self.open_processes,
+        )
+        self.btn_proc.pack(side="left", expand=True, fill="x", padx=(0, 6))
+
         self.btn_settings = ctk.CTkButton(
             row,
             text=t("btn_settings"),
@@ -1703,6 +1909,24 @@ class App(ctk.CTk):
 
     # ---- settings ----
 
+    def _proc_label(self) -> str:
+        n = len(CFG.get("processes") or [])
+        if n <= 0:
+            return t("btn_processes")
+        return f"{t('btn_processes')} ({n})"
+
+    def refresh_processes_count(self) -> None:
+        try:
+            self.btn_proc.configure(text=self._proc_label())
+        except Exception:
+            pass
+
+    def open_processes(self) -> None:
+        if getattr(self, "proc_win", None) is not None and self.proc_win.winfo_exists():
+            self.proc_win.lift()
+            return
+        self.proc_win = ProcessesWindow(self)
+
     def open_settings(self, hide_main: bool = False) -> None:
         if self.settings is not None and self.settings.winfo_exists():
             self.settings.lift()
@@ -1804,6 +2028,542 @@ class App(ctk.CTk):
         sys.stdout.flush() if sys.stdout else None
         sys.stderr.flush() if sys.stderr else None
         os._exit(0)
+
+
+class HuntOverlay:
+    """Fullscreen crosshair overlay: click = capture exe, Esc = cancel.
+
+    Click is swallowed — the window underneath is not activated.
+    """
+
+    def __init__(self, on_done) -> None:
+        import tkinter as tk
+
+        self.on_done = on_done
+        self.win = tk.Toplevel()
+        self.win.overrideredirect(True)
+        self.win.attributes("-topmost", True)
+        try:
+            self.win.attributes("-alpha", 0.35)
+        except Exception:
+            pass
+        self.win.configure(bg="#000000")
+        # physical virtual-screen metrics — covers all monitors at any DPI
+        try:
+            import ctypes
+
+            user32 = ctypes.windll.user32
+            SM_XVIRTUALSCREEN = 76
+            SM_YVIRTUALSCREEN = 77
+            SM_CXVIRTUALSCREEN = 78
+            SM_CYVIRTUALSCREEN = 79
+            x = user32.GetSystemMetrics(SM_XVIRTUALSCREEN)
+            y = user32.GetSystemMetrics(SM_YVIRTUALSCREEN)
+            w = user32.GetSystemMetrics(SM_CXVIRTUALSCREEN)
+            h = user32.GetSystemMetrics(SM_CYVIRTUALSCREEN)
+        except Exception:
+            x, y = 0, 0
+            w = self.win.winfo_screenwidth()
+            h = self.win.winfo_screenheight()
+        self.win.geometry(f"{w}x{h}+{x}+{y}")
+        self.win.config(cursor="crosshair")
+
+        lbl = tk.Label(
+            self.win,
+            text="◎",
+            font=("Segoe UI", 48, "bold"),
+            bg="#000000",
+            fg="#ff2e2e",
+        )
+        lbl.place(relx=0.5, rely=0.45, anchor="center")
+        tip = tk.Label(
+            self.win,
+            text=t("hunt_tip"),
+            font=("Segoe UI", 12),
+            bg="#000000",
+            fg="#e8f0f4",
+        )
+        tip.place(relx=0.5, rely=0.55, anchor="center")
+
+        # bind click on window AND all labels (labels swallow clicks otherwise)
+        for wdg in (self.win, lbl, tip):
+            wdg.bind("<Button-1>", self._click)
+        self.win.bind("<Escape>", lambda e: self._finish(None))
+
+        # also catch Esc globally while overlay is up
+        try:
+            self._esc_hook = keyboard.on_press_key("esc", lambda e: self._finish(None))
+        except Exception:
+            self._esc_hook = None
+
+        try:
+            self.win.deiconify()
+            self.win.lift()
+            self.win.focus_force()
+        except Exception:
+            pass
+
+    def _click(self, event) -> None:
+        # remember point, hide overlay, resolve exe under that point
+        x, y = event.x_root, event.y_root
+        try:
+            self.win.withdraw()
+            self.win.update_idletasks()
+            time.sleep(0.12)
+        except Exception:
+            pass
+        exe = _exe_at(x, y)
+        self._finish(exe)
+
+    def _finish(self, exe: str | None) -> None:
+        try:
+            if self._esc_hook:
+                keyboard.unhook(self._esc_hook)
+        except Exception:
+            pass
+        try:
+            self.win.destroy()
+        except Exception:
+            pass
+        try:
+            self.on_done(exe)
+        except Exception:
+            pass
+
+
+class ProcessesWindow(ctk.CTkToplevel):
+    """Per-process pre-keys for dictation."""
+
+    def __init__(self, app: "App") -> None:
+        super().__init__(app)
+        self.app = app
+        self._from_compact = False
+        self.title(t("processes_title"))
+        self.geometry("520x520")
+        self.minsize(520, 520)
+        self.maxsize(520, 520)
+        self.resizable(False, False)
+        self.configure(fg_color=T["bg"])
+        try:
+            self.grab_set()
+            self.transient(app)
+        except Exception:
+            pass
+
+        self._build()
+        self.protocol("WM_DELETE_WINDOW", self._close)
+
+    def _build(self) -> None:
+        head = ctk.CTkFrame(self, fg_color="transparent")
+        head.pack(fill="x", padx=20, pady=(18, 8))
+        ctk.CTkLabel(
+            head,
+            text=t("processes_title"),
+            font=ctk.CTkFont(family=DISPLAY, size=16, weight="bold"),
+            text_color=T["text"],
+        ).pack(side="left")
+
+        self.btn_add = ctk.CTkButton(
+            head,
+            text=t("proc_add"),
+            height=32,
+            width=110,
+            corner_radius=0,
+            fg_color=T["panel"],
+            hover_color="#243038",
+            border_width=1,
+            border_color=T["line"],
+            text_color=T["text"],
+            command=self._add_file,
+        )
+        self.btn_add.pack(side="right")
+
+        self.btn_hunt = ctk.CTkButton(
+            head,
+            text=t("proc_hunt"),
+            height=32,
+            width=90,
+            corner_radius=0,
+            fg_color=T["red"],
+            hover_color="#D92222",
+            text_color="#FFFFFF",
+            command=self._hunt,
+        )
+        self.btn_hunt.pack(side="right", padx=(0, 6))
+
+        self.list_frame = ctk.CTkScrollableFrame(self, fg_color=T["bg"], corner_radius=0)
+        self.list_frame.pack(fill="both", expand=True, padx=20, pady=(4, 8))
+
+        ctk.CTkLabel(
+            self,
+            text=t("proc_hint"),
+            text_color=T["faint"],
+            font=ctk.CTkFont(family=BODY, size=10),
+        ).pack(fill="x", padx=20, pady=(0, 4))
+
+        btns = ctk.CTkFrame(self, fg_color=T["panel"], corner_radius=0)
+        btns.pack(fill="x", side="bottom")
+        ctk.CTkButton(
+            btns,
+            text=t("set_cancel"),
+            width=100,
+            height=38,
+            corner_radius=0,
+            fg_color="transparent",
+            hover_color=T["line"],
+            border_width=1,
+            border_color=T["line"],
+            text_color=T["text"],
+            command=self._close,
+        ).pack(side="right", padx=(8, 20), pady=12)
+        ctk.CTkButton(
+            btns,
+            text=t("set_save"),
+            width=120,
+            height=38,
+            corner_radius=0,
+            fg_color=T["red"],
+            hover_color="#D92222",
+            text_color="#FFFFFF",
+            command=self._save,
+        ).pack(side="right", padx=(0, 8), pady=12)
+
+        self._rebuild_list()
+
+    def _rebuild_list(self) -> None:
+        self._proc_bodies = []
+        self._row_widgets = {}
+        for ch in self.list_frame.winfo_children():
+            ch.destroy()
+        procs = CFG.get("processes") or []
+        if not procs:
+            ctk.CTkLabel(
+                self.list_frame,
+                text=t("processes_empty"),
+                text_color=T["faint"],
+            ).pack(pady=30)
+            return
+        for i, proc in enumerate(procs):
+            self._proc_row(i, proc)
+
+    def _proc_row(self, i: int, proc: dict) -> None:
+        """Accordion: closed = icon + name, open = full settings."""
+        wrap = ctk.CTkFrame(self.list_frame, fg_color="transparent")
+        wrap.pack(fill="x", pady=4)
+
+        head = ctk.CTkFrame(
+            wrap,
+            fg_color=T["panel"],
+            corner_radius=0,
+            border_width=1,
+            border_color=T["line"],
+        )
+        head.pack(fill="x")
+
+        icon_lbl = ctk.CTkLabel(
+            head, text="", width=28, height=28, fg_color="transparent"
+        )
+        icon_lbl.pack(side="left", padx=(10, 4), pady=8)
+        try:
+            icon_img = _exe_icon(proc.get("exe", ""))
+            if icon_img is not None:
+                icon_lbl.configure(image=icon_img)
+                icon_lbl._icon = icon_img
+        except Exception:
+            pass
+
+        name = proc.get("name") or Path(proc.get("exe", "")).name
+        ctk.CTkLabel(
+            head,
+            text=name,
+            font=ctk.CTkFont(family=DISPLAY, size=12, weight="bold"),
+            text_color=T["text"],
+            anchor="w",
+        ).pack(side="left", fill="x", expand=True, pady=8)
+
+        mark = ctk.CTkLabel(
+            head,
+            text="+",
+            width=18,
+            font=ctk.CTkFont(family=DISPLAY, size=14, weight="bold"),
+            text_color=T["muted"],
+        )
+        mark.pack(side="right", padx=(4, 12), pady=8)
+
+        body = ctk.CTkFrame(wrap, fg_color=T["bg"], corner_radius=0)
+
+        # --- body content ---
+        key_row = ctk.CTkFrame(body, fg_color="transparent")
+        key_row.pack(fill="x", padx=12, pady=(10, 4))
+
+        btn_key = ctk.CTkButton(
+            key_row,
+            text=f"{t('proc_key')}: {proc.get('key') or '—'}",
+            height=28,
+            width=150,
+            corner_radius=0,
+            fg_color=T["panel"],
+            hover_color="#243038",
+            border_width=1,
+            border_color=T["line"],
+            text_color=T["text"],
+            font=ctk.CTkFont(family=BODY, size=11),
+            command=lambda idx=i: self._capture_key(idx),
+        )
+        btn_key.pack(side="left", padx=(0, 6))
+        if not hasattr(self, "_row_widgets"):
+            self._row_widgets = {}
+        self._row_widgets[i] = {"btn_key": btn_key}
+
+        mode_var = ctk.StringVar(value=proc.get("key_mode", "press"))
+        r_press = ctk.CTkRadioButton(
+            key_row,
+            text=t("proc_key_press"),
+            variable=mode_var,
+            value="press",
+            font=ctk.CTkFont(family=BODY, size=11),
+            fg_color=T["red"],
+            command=lambda idx=i, v=mode_var: self._set_key_mode(idx, v.get()),
+        )
+        r_press.pack(side="left", padx=(0, 4))
+        r_hold = ctk.CTkRadioButton(
+            key_row,
+            text=t("proc_key_hold"),
+            variable=mode_var,
+            value="hold",
+            font=ctk.CTkFont(family=BODY, size=11),
+            fg_color=T["red"],
+            command=lambda idx=i, v=mode_var: self._set_key_mode(idx, v.get()),
+        )
+        r_hold.pack(side="left")
+
+        act_row = ctk.CTkFrame(body, fg_color="transparent")
+        act_row.pack(fill="x", padx=12, pady=(0, 10))
+
+        enabled = ctk.CTkCheckBox(
+            act_row,
+            text=t("proc_enabled"),
+            corner_radius=0,
+            fg_color=T["red"],
+            font=ctk.CTkFont(family=BODY, size=11),
+            command=lambda idx=i: self._toggle_enabled(idx),
+        )
+        if proc.get("enabled", True):
+            enabled.select()
+        enabled.pack(side="left")
+
+        ctk.CTkButton(
+            act_row,
+            text=t("proc_clear_key"),
+            height=26,
+            width=110,
+            corner_radius=0,
+            fg_color="transparent",
+            hover_color=T["line"],
+            border_width=1,
+            border_color=T["line"],
+            text_color=T["muted"],
+            font=ctk.CTkFont(family=BODY, size=10),
+            command=lambda idx=i: self._clear_key(idx),
+        ).pack(side="right")
+
+        ctk.CTkButton(
+            act_row,
+            text=t("proc_remove"),
+            height=26,
+            width=80,
+            corner_radius=0,
+            fg_color="transparent",
+            hover_color=T["line"],
+            border_width=1,
+            border_color=T["line"],
+            text_color=T["faint"],
+            font=ctk.CTkFont(family=BODY, size=10),
+            command=lambda idx=i: self._remove(idx),
+        ).pack(side="right", padx=6)
+
+        # exclusive accordion (one open)
+        def toggle() -> None:
+            if body.winfo_ismapped():
+                body.pack_forget()
+                mark.configure(text="+")
+                return
+            # close others
+            for other in getattr(self, "_proc_bodies", []):
+                try:
+                    other["body"].pack_forget()
+                    other["mark"].configure(text="+")
+                except Exception:
+                    pass
+            body.pack(fill="x", pady=(2, 4))
+            mark.configure(text="−")
+
+        # click anywhere on the header row opens the accordion
+        def bind_all(w):
+            try:
+                w.bind("<Button-1>", lambda _e: toggle())
+            except Exception:
+                pass
+            for child in w.winfo_children():
+                bind_all(child)
+
+        bind_all(head)
+
+        if not hasattr(self, "_proc_bodies"):
+            self._proc_bodies = []
+        self._proc_bodies.append({"body": body, "mark": mark})
+
+    def _set_key_mode(self, idx: int, mode: str) -> None:
+        procs = CFG.get("processes") or []
+        if 0 <= idx < len(procs):
+            procs[idx]["key_mode"] = mode
+
+    def _toggle_enabled(self, idx: int) -> None:
+        procs = CFG.get("processes") or []
+        if 0 <= idx < len(procs):
+            procs[idx]["enabled"] = not bool(procs[idx].get("enabled", True))
+
+    def _clear_key(self, idx: int) -> None:
+        procs = CFG.get("processes") or []
+        if 0 <= idx < len(procs):
+            procs[idx]["key"] = ""
+            self._patch_key_btn(idx)
+
+    def _patch_key_btn(self, idx: int) -> None:
+        btn = self._row_widgets.get(idx, {}).get("btn_key")
+        if btn is None:
+            return
+        procs = CFG.get("processes") or []
+        if 0 <= idx < len(procs):
+            key = procs[idx].get("key") or "—"
+            try:
+                btn.configure(text=f"{t('proc_key')}: {key}")
+            except Exception:
+                pass
+
+    def _capture_key(self, idx: int) -> None:
+        """Listen once for key combo and store it."""
+        if getattr(self, "_capturing", False):
+            return
+        self._capturing = True
+        self.app.on_log("info", t("set_hotkey_capture"))
+
+        import keyboard as kb
+
+        pressed = set()
+
+        def on_press(e):
+            name = _norm_key(e.name)
+            if name == "esc":
+                self._capturing = False
+                kb.unhook(hook)
+                return
+            pressed.add(name)
+            # simple combo: modifiers + last key
+            mods = {"ctrl", "alt", "shift", "windows"}
+            if name in mods:
+                return
+            combo = "+".join(sorted(pressed)) if len(pressed) > 1 else name
+            procs = CFG.get("processes") or []
+            if 0 <= idx < len(procs):
+                procs[idx]["key"] = combo
+            self._capturing = False
+            kb.unhook(hook)
+            self._patch_key_btn(idx)
+
+        hook = kb.on_press(on_press)
+
+    def _add_file(self) -> None:
+        from tkinter import filedialog
+
+        path = filedialog.askopenfilename(
+            title=t("proc_add"),
+            filetypes=[("Executable", "*.exe"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        p = Path(path)
+        procs = CFG.get("processes") or []
+        procs.append(
+            {
+                "exe": str(p),
+                "name": p.name,
+                "key": "",
+                "key_mode": "press",
+                "enabled": True,
+            }
+        )
+        CFG["processes"] = procs
+        self._rebuild_list()
+        self.app.refresh_processes_count()
+
+    def _hunt(self) -> None:
+        """Fullscreen overlay: click window to capture exe."""
+        if getattr(self, "_hunting", False):
+            return
+        self._hunting = True
+        self.app.on_log("info", "hunt start")
+        # modal grab would eat overlay clicks
+        try:
+            self.grab_release()
+        except Exception:
+            pass
+
+        def done(exe):
+            self._hunting = False
+            try:
+                self.grab_set()
+            except Exception:
+                pass
+            if not exe:
+                self.app.on_log("warn", t("processes_empty"))
+                return
+            pth = Path(exe)
+            procs = CFG.get("processes") or []
+            for pr in procs:
+                if pr.get("exe", "").lower() == str(pth).lower():
+                    self._rebuild_list()
+                    return
+            procs.append(
+                {
+                    "exe": str(pth),
+                    "name": pth.name,
+                    "key": "",
+                    "key_mode": "press",
+                    "enabled": True,
+                }
+            )
+            CFG["processes"] = procs
+            self._rebuild_list()
+            self.app.refresh_processes_count()
+
+        try:
+            HuntOverlay(done)
+        except Exception as e:
+            self._hunting = False
+            self.app.on_log("error", f"hunt: {e}")
+
+    def _remove(self, idx: int) -> None:
+        procs = CFG.get("processes") or []
+        if 0 <= idx < len(procs):
+            procs.pop(idx)
+            CFG["processes"] = procs
+            self._rebuild_list()
+            self.app.refresh_processes_count()
+
+    def _save(self) -> None:
+        save_config(CFG)
+        self.app.refresh_processes_count()
+        self.app.on_log("ok", t("set_saved"))
+        self._close()
+
+    def _close(self) -> None:
+        try:
+            self.grab_release()
+        except Exception:
+            pass
+        self.destroy()
+        self.app.proc_win = None
 
 
 class SettingsWindow(ctk.CTkToplevel):
