@@ -161,6 +161,12 @@ DEFAULT_CONFIG = {
     "device": "auto",
     "compute_type": "auto",
     "monitor_open": False,
+    "mic": "",
+    "silence_stop": False,
+    "close_to_tray": False,
+    "autostart_win": False,
+    "journal_enable": True,
+    "silence_sec": 2.0,
     "device_choice": "auto",
     "topmost": False,
     "compact_on_start": False,
@@ -247,15 +253,48 @@ def _record_worker() -> None:
             frames.append(indata.copy())
 
     try:
+        mic = CFG.get("mic") or None
+        if isinstance(mic, str) and mic != "":
+            try:
+                mic = int(mic)
+            except Exception:
+                mic = None
         with sd.InputStream(
-            samplerate=sample_rate, channels=1, dtype="int16", callback=callback
+            samplerate=sample_rate,
+            channels=1,
+            dtype="int16",
+            device=mic,
+            callback=callback,
         ):
             start = time.monotonic()
+            silence_sec = float(CFG.get("silence_sec", 2.0))
+            check_silence = CFG.get("silence_stop") and CFG.get("hotkey_mode") == "toggle"
+            silent_since = None
             while _state["recording"]:
                 if time.monotonic() - start > max_seconds:
                     _emit("warn", "log_max_dur")
-                    _state["recording"] = False
+                    _state["stop_requested"] = True
                     break
+                if check_silence and frames:
+                    # RMS of last ~0.3s
+                    import numpy as _np
+
+                    n = max(1, int(0.3 * sample_rate))
+                    tail = frames[-1]
+                    if tail.shape[0] >= n:
+                        chunk = tail[-n:].astype(_np.float32)
+                    else:
+                        chunk = _np.concatenate(frames)[-n:].astype(_np.float32)
+                    rms = float(_np.sqrt(_np.mean(chunk**2))) if chunk.size else 0.0
+                    if rms < 300:  # quiet threshold
+                        if silent_since is None:
+                            silent_since = time.monotonic()
+                        elif time.monotonic() - silent_since >= silence_sec:
+                            _emit("info", "log_silence_stop")
+                            _state["stop_requested"] = True
+                            break
+                    else:
+                        silent_since = None
                 time.sleep(0.05)
     except Exception as e:
         _emit("error", "log_mic_err", err=str(e))
@@ -343,6 +382,7 @@ def _stop_and_process() -> None:
             return
         _emit("text", text)
         _paste_text(text)
+        _journal_append(text)
         _emit("ok", "log_pasted", dt=dt)
     except Exception as e:
         _emit("error", "log_err", err=str(e))
@@ -358,6 +398,93 @@ def _stop_and_process() -> None:
 
 def on_hotkey() -> None:
     toggle_record()
+
+
+def _foreground_process_name() -> str:
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        hwnd = user32.GetForegroundWindow()
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        h = ctypes.windll.kernel32.OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value
+        )
+        try:
+            buf = ctypes.create_unicode_buffer(260)
+            size = wintypes.DWORD(260)
+            ctypes.windll.kernel32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size))
+            name = Path(buf.value).name
+            return name or "unknown.exe"
+        finally:
+            if h:
+                ctypes.windll.kernel32.CloseHandle(h)
+    except Exception:
+        return "unknown.exe"
+
+
+def _journal_append(text: str) -> None:
+    """my-talks/<process>_<date>.txt — one file per process per day."""
+    if not CFG.get("journal_enable", True):
+        return
+    try:
+        proc = _foreground_process_name()
+        # do not journal into ourselves if focus is on this app? still ok
+        day = time.strftime("%Y-%m-%d")
+        folder = APP_DIR.parent / "my-talks"
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / f"{proc}_{day}.txt"
+        stamp = time.strftime("%H:%M:%S")
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(f"[{stamp}] {text}\n")
+    except Exception:
+        pass
+
+
+def _acquire_single_instance() -> bool:
+    """Windows mutex — only one app instance. Returns False if already running."""
+    if sys.platform != "win32":
+        return True
+    try:
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        mutex = kernel32.CreateMutexW(None, False, "SAYMYNAME_SINGLE_INSTANCE")
+        last = kernel32.GetLastError()
+        ERROR_ALREADY_EXISTS = 183
+        if mutex and last == ERROR_ALREADY_EXISTS:
+            return False
+        _state["mutex"] = mutex
+        return True
+    except Exception:
+        return True
+
+
+def _set_autostart(enabled: bool) -> None:
+    """HKCU Run key -> wscript start.vbs"""
+    if sys.platform != "win32":
+        return
+    try:
+        import winreg
+
+        key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
+        name = "SAYMYNAME"
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE
+        ) as key:
+            if enabled:
+                vbs = str(APP_DIR.parent / "start.vbs")
+                winreg.SetValueEx(key, name, 0, winreg.REG_SZ, f'wscript.exe "{vbs}"')
+            else:
+                try:
+                    winreg.DeleteValue(key, name)
+                except FileNotFoundError:
+                    pass
+    except Exception:
+        pass
 
 
 def register_hotkey(hotkey: str, mode: str | None = None) -> None:
@@ -692,6 +819,21 @@ class CompactWindow:
                          command=lambda: pick("toggle"))
         menu.add_command(label=("✓ " if mode == "hold" else "    ") + hold_txt,
                          command=lambda: pick("hold"))
+
+        # silence auto-stop — only with Toggle
+        if mode == "toggle":
+            sil = bool(CFG.get("silence_stop", False))
+            sil_txt = t("silence_stop")
+            def pick_silence() -> None:
+                CFG["silence_stop"] = not bool(CFG.get("silence_stop", False))
+                save_config(CFG)
+                self.app.on_log("info", t("log_hotkey_mode", mode=silence_label()))
+            def silence_label() -> str:
+                return t("silence_stop") if CFG.get("silence_stop") else t("mode_toggle")
+            menu.add_command(
+                label=("✓ " if sil else "    ") + sil_txt,
+                command=pick_silence,
+            )
 
         menu.add_separator()
         menu.add_command(label=t("ctx_exit"), command=self.app.on_close)
@@ -1568,7 +1710,84 @@ class App(ctk.CTk):
         win = SettingsWindow(self, from_compact=hide_main)
         self.settings = win
 
+    def _to_tray(self) -> None:
+        try:
+            self.withdraw()
+            if self.compact is not None and self.compact.winfo_exists():
+                self.compact.withdraw()
+        except Exception:
+            pass
+        self._ensure_tray()
+
+    def _ensure_tray(self) -> None:
+        if getattr(self, "_tray", None) is not None:
+            return
+        try:
+            import pystray
+            from PIL import Image
+
+            icon_path = ICON_PATH
+            try:
+                pil = Image.open(icon_path)
+            except Exception:
+                pil = Image.new("RGB", (64, 64), (230, 69, 83))
+
+            # default=True → left click on icon runs this item
+            menu = pystray.Menu(
+                pystray.MenuItem(
+                    t("tray_open"),
+                    lambda: self._from_tray(),
+                    default=True,
+                ),
+                pystray.MenuItem(t("tray_exit"), lambda: self._really_exit()),
+            )
+            self._tray = pystray.Icon(
+                "say_my_name",
+                pil,
+                t("app_title"),
+                menu,
+                # left click on tray icon opens the window
+                on_activate=lambda _icon, _item=None: self._from_tray(),
+            )
+            threading.Thread(target=self._tray.run, daemon=True).start()
+        except Exception:
+            # no tray — close anyway
+            self._really_exit()
+
+    def _from_tray(self) -> None:
+        try:
+            self.deiconify()
+            self.lift()
+            self.focus_force()
+            self._really_quit = False
+        except Exception:
+            pass
+        # hide tray icon while window is visible
+        self._hide_tray()
+
+    def _hide_tray(self) -> None:
+        tray = getattr(self, "_tray", None)
+        if tray is None:
+            return
+        try:
+            tray.stop()
+        except Exception:
+            pass
+        self._tray = None
+
+    def _really_exit(self) -> None:
+        self._really_quit = True
+        try:
+            if getattr(self, "_tray", None):
+                self._tray.stop()
+        except Exception:
+            pass
+        self.on_close()
+
     def on_close(self) -> None:
+        if CFG.get("close_to_tray") and not getattr(self, "_really_quit", False):
+            self._to_tray()
+            return
         try:
             keyboard.unhook_all()
         except Exception:
@@ -1755,6 +1974,30 @@ class SettingsWindow(ctk.CTkToplevel):
             anchor="w",
         ).pack(anchor="w", padx=(28, 0))
 
+        # silence auto-stop — only meaningful with Toggle
+        self.chk_silence = ctk.CTkCheckBox(
+            row_t,
+            text=t("silence_stop"),
+            corner_radius=0,
+            fg_color=T["red"],
+            hover_color="#D92222",
+            text_color=T["text"],
+            font=ctk.CTkFont(family=BODY, size=12),
+        )
+        self.chk_silence.pack(anchor="w", padx=(28, 0), pady=(2, 0))
+        if CFG.get("silence_stop"):
+            self.chk_silence.select()
+
+        def _sync_silence() -> None:
+            # disable for Hold
+            if self._mode_var.get() == "hold":
+                self.chk_silence.configure(state="disabled", text_color=T["faint"])
+            else:
+                self.chk_silence.configure(state="normal", text_color=T["text"])
+
+        self._mode_var.trace_add("write", lambda *_: _sync_silence())
+        _sync_silence()
+
         row_h = ctk.CTkFrame(hot, fg_color="transparent")
         row_h.pack(fill="x", padx=14, pady=(8, 12))
         self.rad_hold = ctk.CTkRadioButton(
@@ -1937,6 +2180,53 @@ class SettingsWindow(ctk.CTkToplevel):
             command=self._open_folder,
         ).pack(side="right")
 
+        # --- 1.5 Audio ---
+        audio = accordion("audio", t("set_audio"))
+        ctk.CTkLabel(
+            audio,
+            text=t("set_mic"),
+            anchor="w",
+            font=ctk.CTkFont(family=DISPLAY, size=12, weight="bold"),
+            text_color=T["muted"],
+        ).pack(fill="x", padx=14, pady=(12, 4))
+
+        def _mic_devices() -> list:
+            out = [(t("mic_default"), "")]
+            try:
+                import sounddevice as sd
+
+                for i, d in enumerate(sd.query_devices()):
+                    if d.get("max_input_channels", 0) > 0:
+                        name = f"{i}: {d.get('name', f'Device {i}')}"
+                        out.append((name, str(i)))
+            except Exception:
+                pass
+            return out
+
+        mic_pairs = _mic_devices()
+        self._mic_names = [n for n, _ in mic_pairs]
+        self._mic_values = {n: v for n, v in mic_pairs}
+        cur_mic = CFG.get("mic", "")
+        cur_label = t("mic_default")
+        for name, val in mic_pairs:
+            if val == cur_mic:
+                cur_label = name
+                break
+
+        self.cmb_mic = ctk.CTkOptionMenu(
+            audio,
+            values=self._mic_names,
+            width=320,
+            corner_radius=0,
+            fg_color=T["panel"],
+            button_color=T["line"],
+            button_hover_color="#35424E",
+            text_color=T["text"],
+            font=ctk.CTkFont(family=BODY, size=12),
+        )
+        self.cmb_mic.set(cur_label)
+        self.cmb_mic.pack(fill="x", padx=14, pady=(0, 12))
+
         # --- 3. Language ---
         lang = accordion("lang", t("set_audio_lang"))
         ctk.CTkLabel(
@@ -2011,6 +2301,40 @@ class SettingsWindow(ctk.CTkToplevel):
             self.chk_top.select()
         self.chk_top.pack(anchor="w", padx=14, pady=6)
 
+        self.chk_tray = ctk.CTkCheckBox(
+            rec,
+            text=t("close_to_tray"),
+            corner_radius=0,
+            fg_color=T["red"],
+            hover_color="#D92222",
+            text_color=T["text"],
+            font=ctk.CTkFont(family=BODY, size=12),
+        )
+        if CFG.get("close_to_tray"):
+            self.chk_tray.select()
+        self.chk_tray.pack(anchor="w", padx=14, pady=6)
+
+        self.chk_autostart = ctk.CTkCheckBox(
+            rec,
+            text=t("autostart_win"),
+            corner_radius=0,
+            fg_color=T["red"],
+            hover_color="#D92222",
+            text_color=T["text"],
+            font=ctk.CTkFont(family=BODY, size=12),
+        )
+        if CFG.get("autostart_win"):
+            self.chk_autostart.select()
+        self.chk_autostart.pack(anchor="w", padx=14, pady=6)
+        ctk.CTkLabel(
+            rec,
+            text=t("autostart_note"),
+            text_color=T["faint"],
+            font=ctk.CTkFont(family=BODY, size=10),
+            wraplength=360,
+            justify="left",
+        ).pack(anchor="w", padx=28, pady=(0, 6))
+
         self.chk_compact = ctk.CTkCheckBox(
             rec,
             text=t("set_compact_start"),
@@ -2023,6 +2347,29 @@ class SettingsWindow(ctk.CTkToplevel):
         if CFG.get("compact_on_start"):
             self.chk_compact.select()
         self.chk_compact.pack(anchor="w", padx=14, pady=(6, 12))
+
+        # --- 5. Journal ---
+        journal = accordion("journal", t("set_journal"))
+        self.chk_journal = ctk.CTkCheckBox(
+            journal,
+            text=t("journal_enable"),
+            corner_radius=0,
+            fg_color=T["red"],
+            hover_color="#D92222",
+            text_color=T["text"],
+            font=ctk.CTkFont(family=BODY, size=12),
+        )
+        if CFG.get("journal_enable", True):
+            self.chk_journal.select()
+        self.chk_journal.pack(anchor="w", padx=14, pady=(12, 4))
+        ctk.CTkLabel(
+            journal,
+            text=t("journal_note"),
+            text_color=T["faint"],
+            font=ctk.CTkFont(family=BODY, size=10),
+            wraplength=360,
+            justify="left",
+        ).pack(anchor="w", padx=14, pady=(0, 12))
 
         # --- 5. Updates (no accordion) ---
         ctk.CTkLabel(
@@ -2407,6 +2754,12 @@ class SettingsWindow(ctk.CTkToplevel):
         CFG["max_record_seconds"] = new_max
         old_device = CFG.get("device_choice")
         CFG["device_choice"] = self._device_var.get()
+        CFG["mic"] = self._mic_values.get(self.cmb_mic.get(), "")
+        CFG["silence_stop"] = bool(self.chk_silence.get()) if self._mode_var.get() != "hold" else False
+        CFG["close_to_tray"] = bool(self.chk_tray.get())
+        CFG["autostart_win"] = bool(self.chk_autostart.get())
+        CFG["journal_enable"] = bool(self.chk_journal.get())
+        _set_autostart(CFG["autostart_win"])
         if old_device != CFG["device_choice"]:
             dev_name = (
                 gpu_info.gpu_name() or "GPU"
@@ -3061,6 +3414,19 @@ def main() -> None:
         sys.stdout = open(os.devnull, "w", encoding="utf-8")
     if sys.stderr is None:
         sys.stderr = open(os.devnull, "w", encoding="utf-8")
+
+    if not _acquire_single_instance():
+        try:
+            import tkinter as tk
+            import tkinter.messagebox as mb
+
+            r = tk.Tk()
+            r.withdraw()
+            mb.showinfo(t("app_title"), t("already_running"))
+            r.destroy()
+        except Exception:
+            pass
+        os._exit(0)
 
     app = App()
     app.mainloop()
