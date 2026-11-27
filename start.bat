@@ -64,6 +64,9 @@ if errorlevel 1 (
 )
 
 :deps_done
+if exist "SAY MY NAME.lnk" goto :launch
 powershell -NoProfile -ExecutionPolicy Bypass -File make_lnk.ps1
+
+:launch
 start "" venv\Scripts\pythonw.exe app\asr_ui.py
 exit /b 0

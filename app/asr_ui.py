@@ -1258,9 +1258,10 @@ class SettingsWindow(ctk.CTkToplevel):
     def _build(self) -> None:
         self.configure(fg_color=T["bg"])
         outer = ctk.CTkScrollableFrame(self, fg_color=T["bg"], corner_radius=0)
-        outer.pack(fill="both", expand=True, padx=0, pady=0)
+        outer.pack(fill="both", expand=True, padx=0, pady=(0, 0))
 
         self._acc_panels = {}
+        self._acc_marks = {}
 
         def accordion(key: str, title: str, open_by_default: bool = False) -> ctk.CTkFrame:
             wrap = ctk.CTkFrame(outer, fg_color="transparent")
@@ -1291,21 +1292,29 @@ class SettingsWindow(ctk.CTkToplevel):
             body = ctk.CTkFrame(wrap, fg_color="transparent")
 
             def toggle() -> None:
-                if body.winfo_ismapped():
-                    body.pack_forget()
-                    mark.configure(text="+")
-                else:
+                open_now = body.winfo_ismapped()
+                # close all panels
+                for other_key, other_body in self._acc_panels.items():
+                    try:
+                        other_body.pack_forget()
+                    except Exception:
+                        pass
+                    # reset marks
+                    mark_w = self._acc_marks.get(other_key)
+                    if mark_w is not None:
+                        mark_w.configure(text="+")
+                if not open_now:
                     body.pack(fill="x", pady=(2, 4))
                     mark.configure(text="−")
 
             for w in (head, mark):
                 w.bind("<Button-1>", lambda _e: toggle())
-            # label inside header should also toggle
             for child in head.winfo_children():
                 if child is not mark:
                     child.bind("<Button-1>", lambda _e: toggle())
 
             self._acc_panels[key] = body
+            self._acc_marks[key] = mark
             if open_by_default:
                 body.pack(fill="x", pady=(2, 4))
             return body
@@ -1512,7 +1521,7 @@ class SettingsWindow(ctk.CTkToplevel):
             self._ui_btns[code] = btn
 
         # --- 4. Record / window ---
-        rec = accordion("record", t("set_max_rec"))
+        rec = accordion("record", t("set_behavior"))
         ctk.CTkLabel(
             rec, text=t("set_max_rec"), anchor="w",
             font=ctk.CTkFont(family=BODY, size=12),
@@ -1592,9 +1601,9 @@ class SettingsWindow(ctk.CTkToplevel):
         )
         self.lbl_upd.pack(side="left", padx=12)
 
-        # --- Save / Cancel (always visible) ---
-        btns = ctk.CTkFrame(outer, fg_color="transparent")
-        btns.pack(fill="x", padx=24, pady=(22, 12))
+        # --- Save / Cancel (pinned below scroll area) ---
+        btns = ctk.CTkFrame(self, fg_color=T["panel"], corner_radius=0)
+        btns.pack(fill="x", side="bottom", padx=0, pady=0)
         ctk.CTkButton(
             btns,
             text=t("set_cancel"),
@@ -1602,13 +1611,13 @@ class SettingsWindow(ctk.CTkToplevel):
             height=38,
             corner_radius=0,
             fg_color="transparent",
-            hover_color=T["panel"],
+            hover_color=T["line"],
             border_width=1,
             border_color=T["line"],
             text_color=T["text"],
             font=ctk.CTkFont(family=BODY, size=12),
             command=self._close,
-        ).pack(side="right", padx=(8, 0))
+        ).pack(side="right", padx=(8, 24), pady=12)
         ctk.CTkButton(
             btns,
             text=t("set_save"),
@@ -1620,7 +1629,61 @@ class SettingsWindow(ctk.CTkToplevel):
             text_color="#FFFFFF",
             font=ctk.CTkFont(family=DISPLAY, size=12, weight="bold"),
             command=self._save,
-        ).pack(side="right")
+        ).pack(side="right", padx=(0, 8), pady=12)
+
+    def _check_updates(self) -> None:
+        def worker() -> None:
+            self.after(0, lambda: self.lbl_upd.configure(text=t("update_checking")))
+            try:
+                remote, zip_url = app_version.fetch_latest()
+                app_version.mark_checked(APP_DIR / "update_state.json")
+                if app_version.is_newer(remote) and zip_url:
+                    msg = t("update_available", remote=remote)
+                    color = T["amber"]
+
+                    def to_update() -> None:
+                        self.lbl_upd.configure(text=msg, text_color=color)
+                        self.btn_upd.configure(
+                            text=t("update_do"),
+                            fg_color=T["red"],
+                            hover_color="#D92222",
+                            text_color="#FFFFFF",
+                            command=lambda: self._do_update(zip_url),
+                        )
+
+                    try:
+                        self.after(0, to_update)
+                    except Exception:
+                        pass
+                    return
+                if app_version.is_newer(remote):
+                    msg = t("update_available", remote=remote)
+                    color = T["amber"]
+                else:
+                    msg = t("update_current")
+                    color = T["muted"]
+            except Exception:
+                msg = t("update_failed")
+                color = T["faint"]
+
+            def done() -> None:
+                self.lbl_upd.configure(text=msg, text_color=color)
+
+            try:
+                self.after(0, done)
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _do_update(self, zip_url: str) -> None:
+        self.lbl_upd.configure(text=t("update_done"), text_color=T["amber"])
+        try:
+            app_version.run_updater(zip_url, APP_DIR.parent)
+        except Exception:
+            self.lbl_upd.configure(text=t("update_failed"), text_color=T["faint"])
+            return
+        self.after(400, self.app.on_close)
 
     def _hk_label(self) -> str:
         if self._capturing_hotkey:
