@@ -13,7 +13,7 @@ import re
 import time
 from pathlib import Path
 
-__version__ = "2026.11.1"
+__version__ = "2026.11.2"
 
 # Plain-text file that contains only the latest version, e.g. "2026.11.2"
 # Change this URL when the project is published (GitHub raw / release asset).

@@ -749,8 +749,12 @@ class App(ctk.CTk):
     def _build_header(self) -> None:
         head = ctk.CTkFrame(self, fg_color="transparent")
         head.pack(fill="x", padx=28, pady=(26, 4))
+
+        # row 1: title left, version right
+        top = ctk.CTkFrame(head, fg_color="transparent")
+        top.pack(fill="x")
         self.lbl_title = ctk.CTkLabel(
-            head,
+            top,
             text=t("app_title"),
             font=ctk.CTkFont(family=DISPLAY, size=28, weight="bold"),
             anchor="w",
@@ -758,13 +762,15 @@ class App(ctk.CTk):
         )
         self.lbl_title.pack(side="left")
         self.lbl_version = ctk.CTkLabel(
-            head,
+            top,
             text=app_version.__version__,
             font=ctk.CTkFont(family=BODY, size=11),
             anchor="e",
             text_color=T["faint"],
         )
-        self.lbl_version.pack(side="right", padx=(8, 0))
+        self.lbl_version.pack(side="right")
+
+        # row 2: tagline under the title
         self.lbl_tag = ctk.CTkLabel(
             head,
             text=t("tagline"),
@@ -1780,7 +1786,7 @@ class SupportWindow(ctk.CTkToplevel):
         super().__init__(app)
         self.app = app
         self.title(t("support_title"))
-        self.geometry("440x480")
+        self.geometry("560x640")
         self.resizable(False, False)
         self.configure(fg_color=T["bg"])
         try:
@@ -1797,7 +1803,7 @@ class SupportWindow(ctk.CTkToplevel):
         )
         head.pack(padx=24, pady=(22, 12), anchor="w")
 
-        body = ctk.CTkScrollableFrame(self, fg_color="transparent", corner_radius=0)
+        body = ctk.CTkFrame(self, fg_color="transparent")
         body.pack(fill="both", expand=True, padx=20, pady=(0, 12))
 
         for w in self.WALLETS:
@@ -1820,6 +1826,27 @@ class SupportWindow(ctk.CTkToplevel):
             command=self._close,
         ).pack(side="right")
 
+    @staticmethod
+    def _qr_image(data: str, px: int = 88):
+        """Local QR (no external API) → CTkImage."""
+        try:
+            import qrcode
+            from PIL import Image
+
+            qr = qrcode.QRCode(
+                version=None,
+                error_correction=qrcode.constants.ERROR_CORRECT_M,
+                box_size=4,
+                border=2,
+            )
+            qr.add_data(data)
+            qr.make(fit=True)
+            pil = qr.make_image(fill_color="black", back_color="white").convert("RGB")
+            pil = pil.resize((px, px), Image.Resampling.NEAREST)
+            return ctk.CTkImage(light_image=pil, dark_image=pil, size=(px, px))
+        except Exception:
+            return None
+
     def _wallet_row(self, parent, w: dict) -> None:
         row = ctk.CTkFrame(
             parent, fg_color=T["panel"], corner_radius=0,
@@ -1830,10 +1857,18 @@ class SupportWindow(ctk.CTkToplevel):
         stripe = ctk.CTkLabel(
             row, text="", width=4, fg_color=w["color"], corner_radius=0
         )
-        stripe.pack(side="left", fill="y", padx=(0, 12), pady=10)
+        stripe.pack(side="left", fill="y", padx=(0, 10), pady=10)
+
+        qr_img = self._qr_image(w["address"], 88)
+        if qr_img is not None:
+            qr_lbl = ctk.CTkLabel(
+                row, text="", image=qr_img, width=92, height=92, fg_color="#FFFFFF",
+            )
+            qr_lbl.image = qr_img  # keep ref
+            qr_lbl.pack(side="right", padx=(8, 10), pady=10)
 
         col = ctk.CTkFrame(row, fg_color="transparent")
-        col.pack(side="left", fill="both", expand=True, padx=(0, 12), pady=10)
+        col.pack(side="left", fill="both", expand=True, padx=(0, 8), pady=10)
 
         ctk.CTkLabel(
             col,
@@ -1867,7 +1902,7 @@ class SupportWindow(ctk.CTkToplevel):
         ctk.CTkButton(
             actions,
             text=t("support_copy"),
-            width=110,
+            width=150,
             height=28,
             corner_radius=0,
             fg_color="transparent",
@@ -1888,7 +1923,7 @@ class SupportWindow(ctk.CTkToplevel):
             ctk.CTkButton(
                 actions,
                 text=t("support_open"),
-                width=80,
+                width=90,
                 height=28,
                 corner_radius=0,
                 fg_color=w["color"],

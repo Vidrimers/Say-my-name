@@ -3,3 +3,6 @@ sounddevice
 numpy
 keyboard
 pyperclip
+qrcode
+customtkinter
+Pillow
