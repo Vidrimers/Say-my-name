@@ -147,6 +147,27 @@ def main() -> None:
             return
         ui.status("Done. Starting…")
         time.sleep(0.6)
+        # recreate shortcuts (folder + desktop) in case user deleted them
+        try:
+            import subprocess
+
+            ps1 = root / "make_lnk.ps1"
+            if ps1.exists():
+                subprocess.run(
+                    [
+                        "powershell",
+                        "-NoProfile",
+                        "-ExecutionPolicy",
+                        "Bypass",
+                        "-File",
+                        str(ps1),
+                    ],
+                    timeout=30,
+                    close_fds=True,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+        except Exception:
+            pass
         ui.close()
         launcher = root / "start.vbs"
         if launcher.exists():

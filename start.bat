@@ -21,7 +21,7 @@ pause
 exit /b 1
 
 :files_ok
-REM --- Python: use py launcher if present, else python ---
+REM --- find Python ---
 set "PY="
 py -3 -c "import sys" >nul 2>nul
 if not errorlevel 1 set "PY=py -3"
@@ -39,11 +39,11 @@ exit /b 1
 :have_python
 echo Using: %PY%
 
+set "REQ=app\requirements.txt"
 if not exist "venv\Scripts\python.exe" goto :make_venv
 
 echo Checking packages...
-venv\Scripts\python.exe -m pip install -r app
-equirements.txt >nul 2>nul
+venv\Scripts\python.exe -m pip install -r "%REQ%" >nul 2>nul
 goto :deps_done
 
 :make_venv
@@ -56,7 +56,7 @@ if errorlevel 1 (
 )
 echo Installing packages...
 venv\Scripts\python.exe -m pip install --upgrade pip
-venv\Scripts\python.exe -m pip install -r app\requirements.txt
+venv\Scripts\python.exe -m pip install -r "%REQ%"
 if errorlevel 1 (
     echo Dependency install failed.
     pause
