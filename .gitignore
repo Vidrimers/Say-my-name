@@ -9,6 +9,8 @@ assets/
 venv/
 
 #files
+tools/release.bat
+tools/bump_version.py
 app/config.json
 *.pyc
 *.pyo

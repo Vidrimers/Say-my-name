@@ -24,10 +24,44 @@ CONFIG_PATH = APP_DIR / "config.json"
 ICON_PATH = APP_DIR / "app.ico"
 
 
+def _set_process_appid(app_id: str = "SAYMYNAME") -> None:
+    """Tell Windows we are not pythonw.exe for taskbar icon/grouping."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(app_id)
+    except Exception:
+        pass
+
+
+def _iter_process_hwnds():
+    """All top-level HWNDs of this process (Tk winfo_id is not always enough)."""
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.windll.user32
+    pid = ctypes.windll.kernel32.GetCurrentProcessId()
+    found = []
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def enum_proc(hwnd, _lparam):
+        p = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(p))
+        if p.value == pid and user32.IsWindowVisible(hwnd):
+            found.append(int(hwnd))
+        return True
+
+    user32.EnumWindows(enum_proc, 0)
+    return found
+
+
 def set_window_icon(widget, icon_path: Path) -> None:
-    """Set titlebar + Windows taskbar icon (pythonw.exe icon sticks otherwise)."""
+    """Apply .ico to window class — this is what the Windows taskbar shows."""
     if not icon_path.exists():
         return
+
     try:
         widget.iconbitmap(str(icon_path))
     except Exception:
@@ -36,51 +70,65 @@ def set_window_icon(widget, icon_path: Path) -> None:
         widget.wm_iconbitmap(default=str(icon_path))
     except Exception:
         pass
-    # iconphoto (alt) — helps some Windows versions
-    try:
-        from PIL import Image, ImageTk
-
-        pil = Image.open(icon_path)
-        photo = ImageTk.PhotoImage(pil, master=widget)
-        widget.iconphoto(True, photo)
-        widget._iconphoto_ref = photo  # prevent GC
-    except Exception:
-        pass
 
     if sys.platform != "win32":
         return
+
     try:
         import ctypes
 
         user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+
         WM_SETICON = 0x0080
         ICON_SMALL, ICON_BIG = 0, 1
         IMAGE_ICON = 1
         LR_LOADFROMFILE = 0x0010
+        GCLP_HICON, GCLP_HICONSM = -14, -34
 
-        hwnd = int(widget.winfo_id())
+        set_cls = getattr(kernel32, "SetClassLongPtrW", None) or user32.SetClassLongW
+
+        # 125% DPI: small=16, big=32/48 — pick real sizes from the .ico
         hicon_big = user32.LoadImageW(
-            None, str(icon_path), IMAGE_ICON, 0, 0, LR_LOADFROMFILE
+            None, str(icon_path), IMAGE_ICON, 32, 32, LR_LOADFROMFILE
         )
         hicon_sm = user32.LoadImageW(
             None, str(icon_path), IMAGE_ICON, 16, 16, LR_LOADFROMFILE
         )
-        if hicon_big:
-            user32.SendMessageW(hwnd, WM_SETICON, ICON_BIG, hicon_big)
-            GCLP_HICON, GCLP_HICONSM = -14, -34
-            set_cls = getattr(ctypes.windll.kernel32, "SetClassLongPtrW", None)
-            if set_cls is None:
-                set_cls = user32.SetClassLongW
-            set_cls(hwnd, GCLP_HICON, hicon_big)
-            set_cls(hwnd, GCLP_HICONSM, hicon_sm or hicon_big)
-        if hicon_sm:
-            user32.SendMessageW(hwnd, WM_SETICON, ICON_SMALL, hicon_sm)
+        if not hicon_big:
+            return
+
+        hwnds = []
+        try:
+            hwnds.append(int(widget.winfo_id()))
+        except Exception:
+            pass
+        try:
+            hwnds.extend(_iter_process_hwnds())
+        except Exception:
+            pass
+
+        seen = set()
+        for hwnd in hwnds:
+            if not hwnd or hwnd in seen:
+                continue
+            seen.add(hwnd)
+            try:
+                user32.SendMessageW(hwnd, WM_SETICON, ICON_BIG, hicon_big)
+                if hicon_sm:
+                    user32.SendMessageW(hwnd, WM_SETICON, ICON_SMALL, hicon_sm)
+                set_cls(hwnd, GCLP_HICON, hicon_big)
+                set_cls(hwnd, GCLP_HICONSM, hicon_sm or hicon_big)
+            except Exception:
+                pass
     except Exception:
         pass
 
 
 def schedule_window_icon(widget, icon_path: Path) -> None:
-    """Apply icon now and again after the window is fully mapped (taskbar needs this)."""
+    """Set AppID + icons now and after the window is really mapped."""
+    _set_process_appid("SAYMYNAME")
+
     def _apply() -> None:
         try:
             widget.update_idletasks()
@@ -91,7 +139,8 @@ def schedule_window_icon(widget, icon_path: Path) -> None:
     set_window_icon(widget, icon_path)
     try:
         widget.after_idle(_apply)
-        widget.after(300, _apply)
+        for delay in (200, 600, 1500):
+            widget.after(delay, _apply)
     except Exception:
         pass
 

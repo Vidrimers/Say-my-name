@@ -89,10 +89,14 @@ def make_icon(path: Path, size: int = 256) -> None:
     if path.parent:
         path.parent.mkdir(parents=True, exist_ok=True)
     # multi-size ico
-    img.save(path, format="ICO", sizes=[(16, 16), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)])
+    img.save(
+        path,
+        format="ICO",
+        sizes=[(16, 16), (20, 20), (24, 24), (32, 32), (40, 40), (48, 48), (64, 64), (128, 128), (256, 256)],
+    )
 
 
 if __name__ == "__main__":
-    out = Path(__file__).parent / "app.ico"
+    out = Path(__file__).resolve().parent.parent / "app" / "app.ico"
     make_icon(out)
     print(f"wrote {out}")
