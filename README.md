@@ -48,13 +48,20 @@ Python packages (see [`app/requirements.txt`](app/requirements.txt)):
 
 ## Install and run
 
-### 1. Quick start
+### 1. First run
 
-Double-click **`start.bat`** (first run creates `venv` and installs packages by itself).
+Double-click **`start.bat`**. It will:
+- check required files
+- create `venv` and install packages
+- create **`SAY MY NAME.lnk`** in the app folder and on the desktop (only if missing)
+- start the app
 
-Then use **`SAY MY NAME.lnk`** or `start.vbs` for silent starts without a console.
+### 2. Later
 
-### 2. From a terminal
+Use the **desktop shortcut** or **`SAY MY NAME.lnk`** (silent, no console).
+`start.vbs` goes through `start.bat`, so packages are checked on every launch.
+
+### 3. From a terminal
 
 ```bat
 run_ui_debug.bat
@@ -62,7 +69,7 @@ run_ui_debug.bat
 
 Console is useful if something fails.
 
-### 3. Requirements
+### 4. Requirements
 
 - Python 3.10+ with **pip** enabled (installer: *Add python.exe to PATH*)
 - `pip install -r app\requirements.txt` if you manage packages yourself
@@ -115,8 +122,8 @@ Settings are saved in [`app/config.json`](app/config.json) (not in git).
 | Path                   | Purpose                                             |
 | ---------------------- | --------------------------------------------------- |
 | `start.bat`            | First run: find Python, create `venv`, install deps |
-| `SAY MY NAME.lnk`      | Silent launcher (preferred after first run)         |
-| `start.vbs`            | Hidden `pythonw` start (uses `venv` if present)     |
+| `SAY MY NAME.lnk`      | Silent launcher (created on first `start.bat` / update) |
+| `start.vbs`            | Silent start via `start.bat` (checks deps every launch) |
 | `run_ui.bat`           | Forwards to `start.vbs`                             |
 | `run_ui_debug.bat`     | Starts with a console for debugging                 |
 | `make_lnk.ps1`         | Rebuilds the shortcut if the project moves          |
