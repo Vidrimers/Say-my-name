@@ -1260,20 +1260,61 @@ class SettingsWindow(ctk.CTkToplevel):
         outer = ctk.CTkScrollableFrame(self, fg_color=T["bg"], corner_radius=0)
         outer.pack(fill="both", expand=True, padx=0, pady=0)
 
-        def section(label: str, row: int) -> None:
-            ctk.CTkLabel(
-                outer,
-                text=label,
-                anchor="w",
-                font=ctk.CTkFont(family=DISPLAY, size=13, weight="bold"),
-                text_color=T["muted"],
-            ).pack(fill="x", padx=24, pady=(18 if row else 12, 6))
-            ctk.CTkFrame(outer, height=1, fg_color=T["line"]).pack(fill="x", padx=24)
+        self._acc_panels = {}
 
-        # --- Hotkey ---
-        section(t("set_hotkey"), 0)
-        hk_row = ctk.CTkFrame(outer, fg_color="transparent")
-        hk_row.pack(fill="x", padx=24, pady=(10, 4))
+        def accordion(key: str, title: str, open_by_default: bool = False) -> ctk.CTkFrame:
+            wrap = ctk.CTkFrame(outer, fg_color="transparent")
+            wrap.pack(fill="x", padx=24, pady=(10, 0))
+
+            head = ctk.CTkFrame(
+                wrap, fg_color=T["panel"], corner_radius=0,
+                border_width=1, border_color=T["line"],
+            )
+            head.pack(fill="x")
+
+            mark = ctk.CTkLabel(
+                head,
+                text="−" if open_by_default else "+",
+                width=18,
+                font=ctk.CTkFont(family=DISPLAY, size=14, weight="bold"),
+                text_color=T["muted"],
+            )
+            mark.pack(side="left", padx=(12, 6), pady=10)
+            ctk.CTkLabel(
+                head,
+                text=title,
+                font=ctk.CTkFont(family=DISPLAY, size=13, weight="bold"),
+                text_color=T["text"],
+                anchor="w",
+            ).pack(side="left", fill="x", expand=True, pady=10)
+
+            body = ctk.CTkFrame(wrap, fg_color="transparent")
+
+            def toggle() -> None:
+                if body.winfo_ismapped():
+                    body.pack_forget()
+                    mark.configure(text="+")
+                else:
+                    body.pack(fill="x", pady=(2, 4))
+                    mark.configure(text="−")
+
+            for w in (head, mark):
+                w.bind("<Button-1>", lambda _e: toggle())
+            # label inside header should also toggle
+            for child in head.winfo_children():
+                if child is not mark:
+                    child.bind("<Button-1>", lambda _e: toggle())
+
+            self._acc_panels[key] = body
+            if open_by_default:
+                body.pack(fill="x", pady=(2, 4))
+            return body
+
+        # --- 1. Hotkey (open) ---
+        hot = accordion("hotkey", t("set_hotkey"), True)
+
+        hk_row = ctk.CTkFrame(hot, fg_color="transparent")
+        hk_row.pack(fill="x", padx=14, pady=(12, 6))
         self.btn_hotkey = ctk.CTkButton(
             hk_row,
             text=self._hk_label(),
@@ -1287,22 +1328,21 @@ class SettingsWindow(ctk.CTkToplevel):
             font=ctk.CTkFont(family=BODY, size=12),
             command=self._toggle_hotkey_capture,
         )
-        self.btn_hotkey.pack(side="left", fill="x", expand=True)
+        self.btn_hotkey.pack(fill="x")
 
-        # --- Hotkey mode (toggle / hold) — two rows ---
         ctk.CTkLabel(
-            outer,
+            hot,
             text=t("set_hotkey_mode"),
             anchor="w",
-            font=ctk.CTkFont(family=DISPLAY, size=13, weight="bold"),
+            font=ctk.CTkFont(family=DISPLAY, size=12, weight="bold"),
             text_color=T["muted"],
-        ).pack(fill="x", padx=24, pady=(14, 4))
+        ).pack(fill="x", padx=14, pady=(12, 4))
 
         cur_mode = CFG.get("hotkey_mode", "toggle")
         self._mode_var = ctk.StringVar(value="hold" if cur_mode == "hold" else "toggle")
 
-        row_t = ctk.CTkFrame(outer, fg_color="transparent")
-        row_t.pack(fill="x", padx=24, pady=(0, 2))
+        row_t = ctk.CTkFrame(hot, fg_color="transparent")
+        row_t.pack(fill="x", padx=14, pady=(0, 2))
         self.rad_toggle = ctk.CTkRadioButton(
             row_t,
             text=t("mode_toggle"),
@@ -1321,8 +1361,8 @@ class SettingsWindow(ctk.CTkToplevel):
             anchor="w",
         ).pack(anchor="w", padx=(28, 0))
 
-        row_h = ctk.CTkFrame(outer, fg_color="transparent")
-        row_h.pack(fill="x", padx=24, pady=(8, 4))
+        row_h = ctk.CTkFrame(hot, fg_color="transparent")
+        row_h.pack(fill="x", padx=14, pady=(8, 12))
         self.rad_hold = ctk.CTkRadioButton(
             row_h,
             text=t("mode_hold"),
@@ -1341,10 +1381,10 @@ class SettingsWindow(ctk.CTkToplevel):
             anchor="w",
         ).pack(anchor="w", padx=(28, 0))
 
-        # --- Model ---
-        section(t("set_model"), 1)
-        m_row = ctk.CTkFrame(outer, fg_color="transparent")
-        m_row.pack(fill="x", padx=24, pady=(10, 4))
+        # --- 2. Model ---
+        mod = accordion("model", t("set_model"))
+        m_row = ctk.CTkFrame(mod, fg_color="transparent")
+        m_row.pack(fill="x", padx=14, pady=(12, 4))
         self.cmb_model = ctk.CTkOptionMenu(
             m_row,
             values=mm.MODEL_SIZES,
@@ -1368,8 +1408,8 @@ class SettingsWindow(ctk.CTkToplevel):
         )
         self.lbl_model_state.pack(side="left", padx=10)
 
-        d_row = ctk.CTkFrame(outer, fg_color="transparent")
-        d_row.pack(fill="x", padx=24, pady=(4, 2))
+        d_row = ctk.CTkFrame(mod, fg_color="transparent")
+        d_row.pack(fill="x", padx=14, pady=(4, 2))
         self.btn_dl = ctk.CTkButton(
             d_row,
             text=t("set_download"),
@@ -1391,15 +1431,21 @@ class SettingsWindow(ctk.CTkToplevel):
         self.lbl_dl.pack(side="left", padx=10)
 
         self.pbar = ctk.CTkProgressBar(
-            outer, height=4, corner_radius=0, progress_color=T["red"]
+            mod, height=4, corner_radius=0, progress_color=T["red"]
         )
-        self.pbar.pack(fill="x", padx=24, pady=(4, 8))
+        self.pbar.pack(fill="x", padx=14, pady=(4, 8))
         self.pbar.set(0)
 
-        # --- Models path ---
-        section(t("set_models_path"), 2)
-        p_row = ctk.CTkFrame(outer, fg_color="transparent")
-        p_row.pack(fill="x", padx=24, pady=(10, 8))
+        ctk.CTkLabel(
+            mod,
+            text=t("set_models_path"),
+            anchor="w",
+            font=ctk.CTkFont(family=DISPLAY, size=12, weight="bold"),
+            text_color=T["muted"],
+        ).pack(fill="x", padx=14, pady=(10, 4))
+
+        p_row = ctk.CTkFrame(mod, fg_color="transparent")
+        p_row.pack(fill="x", padx=14, pady=(0, 12))
         self.lbl_path = ctk.CTkLabel(
             p_row,
             text=str(mm.models_root()),
@@ -1423,42 +1469,57 @@ class SettingsWindow(ctk.CTkToplevel):
             command=self._open_folder,
         ).pack(side="right")
 
-        # --- Speech language (flag buttons) ---
-        section(t("set_audio_lang"), 3)
+        # --- 3. Language ---
+        lang = accordion("lang", t("set_audio_lang"))
+        ctk.CTkLabel(
+            lang,
+            text=t("set_audio_lang"),
+            anchor="w",
+            font=ctk.CTkFont(family=DISPLAY, size=12, weight="bold"),
+            text_color=T["muted"],
+        ).pack(fill="x", padx=14, pady=(12, 4))
+
         self._speech_lang = CFG.get("language", "ru")
-        self._lang_btns: dict[str, ctk.CTkButton] = {}
-        lang_row = ctk.CTkFrame(outer, fg_color="transparent")
-        lang_row.pack(fill="x", padx=24, pady=(10, 4))
+        self._lang_btns = {}
+        lang_row = ctk.CTkFrame(lang, fg_color="transparent")
+        lang_row.pack(fill="x", padx=14, pady=(0, 10))
         for code, flag, label in (
             ("ru", "ru.png", t("lang_ru").replace("🇷🇺 ", "")),
             ("en", "gb.png", t("lang_en").replace("🇬🇧 ", "")),
             ("auto", "auto.png", t("lang_auto").replace("🌐 ", "")),
         ):
-            btn = self._make_flag_btn(
-                lang_row, flag, label, selected=(code == self._speech_lang)
-            )
+            btn = self._make_flag_btn(lang_row, flag, label, selected=(code == self._speech_lang))
             btn.configure(command=lambda c=code: self._pick_speech_lang(c))
             btn.pack(side="left", padx=(0, 6))
             self._lang_btns[code] = btn
 
-        # --- UI language ---
-        section(t("set_ui_lang"), 4)
+        ctk.CTkLabel(
+            lang,
+            text=t("set_ui_lang"),
+            anchor="w",
+            font=ctk.CTkFont(family=DISPLAY, size=12, weight="bold"),
+            text_color=T["muted"],
+        ).pack(fill="x", padx=14, pady=(6, 4))
+
         self._ui_lang = CFG.get("ui_language", "en")
-        self._ui_btns: dict[str, ctk.CTkButton] = {}
-        ui_row = ctk.CTkFrame(outer, fg_color="transparent")
-        ui_row.pack(fill="x", padx=24, pady=(10, 4))
+        self._ui_btns = {}
+        ui_row = ctk.CTkFrame(lang, fg_color="transparent")
+        ui_row.pack(fill="x", padx=14, pady=(0, 12))
         for code, flag, label in (("ru", "ru.png", t("ui_ru")), ("en", "gb.png", t("ui_en"))):
-            btn = self._make_flag_btn(
-                ui_row, flag, label, selected=(code == self._ui_lang)
-            )
+            btn = self._make_flag_btn(ui_row, flag, label, selected=(code == self._ui_lang))
             btn.configure(command=lambda c=code: self._pick_ui_lang(c))
             btn.pack(side="left", padx=(0, 6))
             self._ui_btns[code] = btn
 
-        # --- Max record ---
-        section(t("set_max_rec"), 5)
+        # --- 4. Record / window ---
+        rec = accordion("record", t("set_max_rec"))
+        ctk.CTkLabel(
+            rec, text=t("set_max_rec"), anchor="w",
+            font=ctk.CTkFont(family=BODY, size=12),
+            text_color=T["muted"],
+        ).pack(fill="x", padx=14, pady=(12, 4))
         self.ent_max = ctk.CTkEntry(
-            outer,
+            rec,
             width=120,
             corner_radius=0,
             fg_color=T["panel"],
@@ -1467,11 +1528,10 @@ class SettingsWindow(ctk.CTkToplevel):
             font=ctk.CTkFont(family=BODY, size=12),
         )
         self.ent_max.insert(0, str(CFG.get("max_record_seconds", 60)))
-        self.ent_max.pack(anchor="w", padx=24, pady=(10, 8))
+        self.ent_max.pack(anchor="w", padx=14, pady=(0, 8))
 
-        # --- Checkboxes ---
         self.chk_top = ctk.CTkCheckBox(
-            outer,
+            rec,
             text=t("set_topmost"),
             corner_radius=0,
             fg_color=T["red"],
@@ -1481,10 +1541,10 @@ class SettingsWindow(ctk.CTkToplevel):
         )
         if CFG.get("topmost"):
             self.chk_top.select()
-        self.chk_top.pack(anchor="w", padx=24, pady=8)
+        self.chk_top.pack(anchor="w", padx=14, pady=6)
 
         self.chk_compact = ctk.CTkCheckBox(
-            outer,
+            rec,
             text=t("set_compact_start"),
             corner_radius=0,
             fg_color=T["red"],
@@ -1494,10 +1554,18 @@ class SettingsWindow(ctk.CTkToplevel):
         )
         if CFG.get("compact_on_start"):
             self.chk_compact.select()
-        self.chk_compact.pack(anchor="w", padx=24, pady=8)
+        self.chk_compact.pack(anchor="w", padx=14, pady=(6, 12))
 
-        # --- Updates ---
-        section(t("set_updates"), 6)
+        # --- 5. Updates (no accordion) ---
+        ctk.CTkLabel(
+            outer,
+            text=t("set_updates"),
+            anchor="w",
+            font=ctk.CTkFont(family=DISPLAY, size=13, weight="bold"),
+            text_color=T["muted"],
+        ).pack(fill="x", padx=24, pady=(18, 4))
+        ctk.CTkFrame(outer, height=1, fg_color=T["line"]).pack(fill="x", padx=24)
+
         upd_row = ctk.CTkFrame(outer, fg_color="transparent")
         upd_row.pack(fill="x", padx=24, pady=(10, 4))
         self.btn_upd = ctk.CTkButton(
@@ -1517,14 +1585,14 @@ class SettingsWindow(ctk.CTkToplevel):
         self.btn_upd.pack(side="left")
         self.lbl_upd = ctk.CTkLabel(
             upd_row,
-            text=f"{app_version.__version__}",
+            text=app_version.__version__,
             anchor="w",
             text_color=T["muted"],
             font=ctk.CTkFont(family=BODY, size=11),
         )
         self.lbl_upd.pack(side="left", padx=12)
 
-        # --- Buttons ---
+        # --- Save / Cancel (always visible) ---
         btns = ctk.CTkFrame(outer, fg_color="transparent")
         btns.pack(fill="x", padx=24, pady=(22, 12))
         ctk.CTkButton(
@@ -1553,58 +1621,6 @@ class SettingsWindow(ctk.CTkToplevel):
             font=ctk.CTkFont(family=DISPLAY, size=12, weight="bold"),
             command=self._save,
         ).pack(side="right")
-
-    def _check_updates(self) -> None:
-        def worker() -> None:
-            self.after(0, lambda: self.lbl_upd.configure(text=t("update_checking")))
-            try:
-                remote, zip_url = app_version.fetch_latest()
-                app_version.mark_checked(APP_DIR / "update_state.json")
-                if app_version.is_newer(remote) and zip_url:
-                    msg = t("update_available", remote=remote)
-                    color = T["amber"]
-
-                    def to_update() -> None:
-                        self.lbl_upd.configure(text=msg, text_color=color)
-                        self.btn_upd.configure(
-                            text=t("update_do"),
-                            fg_color=T["red"],
-                            hover_color="#D92222",
-                            text_color="#FFFFFF",
-                            command=lambda: self._do_update(zip_url),
-                        )
-
-                    try:
-                        self.after(0, to_update)
-                    except Exception:
-                        pass
-                    return
-                if app_version.is_newer(remote):
-                    msg = t("update_available", remote=remote)
-                    color = T["amber"]
-                else:
-                    msg = t("update_current")
-                    color = T["muted"]
-            except Exception:
-                msg = t("update_failed")
-                color = T["faint"]
-            def done() -> None:
-                self.lbl_upd.configure(text=msg, text_color=color)
-            try:
-                self.after(0, done)
-            except Exception:
-                pass
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def _do_update(self, zip_url: str) -> None:
-        self.lbl_upd.configure(text=t("update_done"), text_color=T["amber"])
-        try:
-            app_version.run_updater(zip_url, APP_DIR.parent)
-        except Exception:
-            self.lbl_upd.configure(text=t("update_failed"), text_color=T["faint"])
-            return
-        self.after(400, self.app.on_close)
 
     def _hk_label(self) -> str:
         if self._capturing_hotkey:

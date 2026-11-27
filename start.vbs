@@ -1,19 +1,7 @@
-' Launch SAY MY NAME silently: prefer project venv, then system pythonw.
+' Launch SAY MY NAME via start.bat (checks packages, then starts GUI).
 Option Explicit
-Dim shell, fso, dir, pyw, cmd, venvPy
+Dim shell, fso, dir
 Set shell = CreateObject("WScript.Shell")
 Set fso = CreateObject("Scripting.FileSystemObject")
 dir = fso.GetParentFolderName(WScript.ScriptFullName)
-
-venvPy = dir & "\venv\Scripts\pythonw.exe"
-If fso.FileExists(venvPy) Then
-  pyw = venvPy
-Else
-  pyw = shell.ExpandEnvironmentStrings("%LOCALAPPDATA%\Programs\Python\Python310\pythonw.exe")
-  If Not fso.FileExists(pyw) Then
-    pyw = "pythonw.exe"
-  End If
-End If
-
-cmd = """" & pyw & """ """ & dir & "\app\asr_ui.py"""
-shell.Run cmd, 0, False
+shell.Run "cmd /c """ & dir & "\start.bat""", 0, False
