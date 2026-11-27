@@ -1292,20 +1292,19 @@ class SettingsWindow(ctk.CTkToplevel):
             body = ctk.CTkFrame(wrap, fg_color="transparent")
 
             def toggle() -> None:
-                open_now = body.winfo_ismapped()
-                # close all panels
+                # always keep exactly one panel open
+                if body.winfo_ismapped():
+                    return
                 for other_key, other_body in self._acc_panels.items():
                     try:
                         other_body.pack_forget()
                     except Exception:
                         pass
-                    # reset marks
                     mark_w = self._acc_marks.get(other_key)
                     if mark_w is not None:
                         mark_w.configure(text="+")
-                if not open_now:
-                    body.pack(fill="x", pady=(2, 4))
-                    mark.configure(text="−")
+                body.pack(fill="x", pady=(2, 4))
+                mark.configure(text="−")
 
             for w in (head, mark):
                 w.bind("<Button-1>", lambda _e: toggle())
