@@ -22,6 +22,12 @@
 
 ---
 
+## Видео
+
+[![Демо SAY MY NAME](https://img.youtube.com/vi/ww-oOtd7inU/0.jpg)](https://www.youtube.com/shorts/ww-oOtd7inU)
+
+---
+
 ## Как это работает
 
 1. **Запись** — глобальный хоткей включает микрофон (`sounddevice`, 16 кГц).

@@ -22,6 +22,12 @@ Local voice dictation for the any text field. Hold (or tap) a hotkey, speak, rel
 
 ---
 
+## Video
+
+[![SAY MY NAME demo](https://img.youtube.com/vi/vUoa0aHmE3U/0.jpg)](https://www.youtube.com/shorts/vUoa0aHmE3U)
+
+---
+
 ## How it works
 
 1. **Record** — global hotkey starts microphone capture (`sounddevice`, 16 kHz).
