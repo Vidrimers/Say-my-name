@@ -61,7 +61,7 @@ def apply_zip(url: str, root: Path, ui) -> None:
 class UpdaterUI:
     def __init__(self) -> None:
         self.root = tk.Tk()
-        self.root.title("SAY MY NAME")
+        self.root.overrideredirect(True)  # no titlebar / close button
         self.root.resizable(False, False)
         self.root.attributes("-topmost", True)
         self.root.configure(bg="#151b20")

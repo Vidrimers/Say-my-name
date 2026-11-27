@@ -153,7 +153,7 @@ DEFAULT_CONFIG = {
     "hotkey": "ctrl+alt+space",
     "hotkey_mode": "toggle",  # toggle | hold (hold = global hotkey only)
     "model": "small",
-    "language": "ru",
+    "language": "auto",
     "ui_language": "en",
     "sample_rate": 16000,
     "max_record_seconds": 60,
