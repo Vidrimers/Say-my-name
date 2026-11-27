@@ -1296,6 +1296,20 @@ class App(ctk.CTk):
             command=self.open_support,
         )
         self.btn_support.pack(side="left", padx=(0, 6))
+        self.btn_feedback = ctk.CTkButton(
+            row,
+            text=t("footer_feedback"),
+            height=24,
+            corner_radius=0,
+            fg_color="transparent",
+            hover_color=T["panel"],
+            text_color=T["muted"],
+            border_width=0,
+            font=ctk.CTkFont(family=BODY, size=11),
+            command=self.open_feedback,
+        )
+        self.btn_feedback.pack(side="left", padx=(0, 6))
+
         self.btn_license = ctk.CTkButton(
             row,
             text=t("footer_license"),
@@ -1358,6 +1372,9 @@ class App(ctk.CTk):
         if not pending:
             return
         UpdateDialog(self, pending[0], pending[1])
+
+    def open_feedback(self) -> None:
+        FeedbackWindow(self)
 
     def open_support(self) -> None:
         SupportWindow(self)
@@ -1433,6 +1450,7 @@ class App(ctk.CTk):
         self.foot.configure(text=t("footer"))
         self.btn_support.configure(text=t("footer_support"))
         self.btn_license.configure(text=t("footer_license"))
+        self.btn_feedback.configure(text=t("footer_feedback"))
         self.btn_settings.configure(text=t("btn_settings"))
         self.btn_compact.configure(text=t("btn_compact"))
         self.set_status(self._status_mode)
@@ -2387,6 +2405,170 @@ class SettingsWindow(ctk.CTkToplevel):
                     self.app.compact.update_idletasks()
             except Exception:
                 pass
+
+
+class FeedbackWindow(ctk.CTkToplevel):
+    """Choose Bug / Feature — opens GitHub issue with template."""
+
+    REPO = "https://github.com/Vidrimers/Say-my-name/issues/new"
+
+    def __init__(self, app: "App") -> None:
+        super().__init__(app)
+        self.app = app
+        self.title(t("feedback_title"))
+        self.geometry("380x240")
+        self.resizable(False, False)
+        self.configure(fg_color=T["bg"])
+        try:
+            self.transient(app)
+            self.grab_set()
+        except Exception:
+            pass
+
+        ctk.CTkLabel(
+            self,
+            text=t("feedback_title"),
+            font=ctk.CTkFont(family=DISPLAY, size=16, weight="bold"),
+            text_color=T["text"],
+        ).pack(padx=24, pady=(22, 8), anchor="w")
+
+        ctk.CTkLabel(
+            self,
+            text=t("feedback_note"),
+            font=ctk.CTkFont(family=BODY, size=11),
+            text_color=T["muted"],
+        ).pack(fill="x", padx=24, pady=(0, 16))
+
+        row = ctk.CTkFrame(self, fg_color="transparent")
+        row.pack(fill="x", padx=24, pady=(0, 12))
+
+        ctk.CTkButton(
+            row,
+            text=t("feedback_bug"),
+            height=42,
+            corner_radius=0,
+            fg_color=T["red"],
+            hover_color="#D92222",
+            text_color="#FFFFFF",
+            font=ctk.CTkFont(family=DISPLAY, size=13, weight="bold"),
+            command=lambda: self._open("bug"),
+        ).pack(side="left", expand=True, fill="x", padx=(0, 6))
+
+        ctk.CTkButton(
+            row,
+            text=t("feedback_feature"),
+            height=42,
+            corner_radius=0,
+            fg_color=T["panel"],
+            hover_color="#243038",
+            border_width=1,
+            border_color=T["line"],
+            text_color=T["text"],
+            font=ctk.CTkFont(family=DISPLAY, size=13, weight="bold"),
+            command=lambda: self._open("feature"),
+        ).pack(side="left", expand=True, fill="x")
+
+        ctk.CTkButton(
+            self,
+            text=t("support_close"),
+            width=100,
+            height=34,
+            corner_radius=0,
+            fg_color="transparent",
+            hover_color=T["panel"],
+            border_width=1,
+            border_color=T["line"],
+            text_color=T["muted"],
+            font=ctk.CTkFont(family=BODY, size=12),
+            command=self._close,
+        ).pack(pady=(4, 16))
+
+    def _open(self, kind: str) -> None:
+        import platform
+        import urllib.parse
+        import webbrowser
+
+        lang = i18n.get_lang()
+        ver = app_version.__version__
+        win = platform.platform()
+        dev = (
+            gpu_info.gpu_name()
+            if CFG.get("device_choice", "cpu") == "gpu"
+            else gpu_info.cpu_name()
+        )
+        model = CFG.get("model", "small")
+
+        if lang == "ru":
+            env = (
+                f"Версия: {ver}\n"
+                f"Windows: {win}\n"
+                f"Устройство: {dev}\n"
+                f"Модель: {model}\n"
+            )
+            if kind == "bug":
+                title = "[Bug] "
+                body = (
+                    f"{env}\n"
+                    "**В чём ошибка**\n"
+                    "[опишите, что пошло не так]\n\n"
+                    "**Что ожидали**\n"
+                    "[как должно быть]\n\n"
+                    "**Шаги воспроизведения**\n"
+                    "1. \n2. \n3. \n"
+                )
+            else:
+                title = "[Feature] "
+                body = (
+                    "**Идея**\n"
+                    "[что добавить или изменить]\n\n"
+                    "**Зачем**\n"
+                    "[какую проблему решает]\n\n"
+                    "**Как представляете**\n"
+                    "[по желанию: как это должно выглядеть]\n"
+                )
+        else:
+            env = (
+                f"Version: {ver}\n"
+                f"Windows: {win}\n"
+                f"Device: {dev}\n"
+                f"Model: {model}\n"
+            )
+            if kind == "bug":
+                title = "[Bug] "
+                body = (
+                    f"{env}\n"
+                    "**What went wrong**\n"
+                    "[describe the problem]\n\n"
+                    "**What I expected**\n"
+                    "[what should have happened]\n\n"
+                    "**Steps to reproduce**\n"
+                    "1. \n2. \n3. \n"
+                )
+            else:
+                title = "[Feature] "
+                body = (
+                    "**Idea**\n"
+                    "[what to add or change]\n\n"
+                    "**Why**\n"
+                    "[what problem this solves]\n\n"
+                    "**How you imagine it**\n"
+                    "[optional: how it should look]\n"
+                )
+
+        url = (
+            "https://github.com/Vidrimers/Say-my-name/issues/new"
+            f"?title={urllib.parse.quote(title)}"
+            f"&body={urllib.parse.quote(body)}"
+        )
+        webbrowser.open(url)
+        self._close()
+
+    def _close(self) -> None:
+        try:
+            self.grab_release()
+        except Exception:
+            pass
+        self.destroy()
 
 
 class SupportWindow(ctk.CTkToplevel):
