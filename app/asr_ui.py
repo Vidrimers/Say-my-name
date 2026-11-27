@@ -748,12 +748,21 @@ class ScrollFrame(ctk.CTkFrame):
         self.canvas.configure(yscrollcommand=self.vsb.set)
         self.canvas.pack(side="left", fill="both", expand=True)
 
-        # mouse wheel
-        self.canvas.bind("<Enter>", lambda e: self.canvas.bind_all("<MouseWheel>", self._on_wheel))
-        self.canvas.bind("<Leave>", lambda e: self.canvas.unbind_all("<MouseWheel>"))
+        self._wheel_on = False
 
     def _on_wheel(self, event) -> None:
-        self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        """Scroll only if pointer is over this canvas and content needs it."""
+        if not getattr(self, "_wheel_on", False):
+            return None
+        try:
+            if not self.canvas.winfo_containing(event.x_root, event.y_root):
+                # pointer not on our canvas — maybe on log (nested scroll)
+                pass
+        except Exception:
+            pass
+        units = int(-1 * (event.delta / 120))
+        self.canvas.yview_scroll(units, "units")
+        return "break"
 
     def fit_scrollbar(self) -> None:
         try:
@@ -762,14 +771,20 @@ class ScrollFrame(ctk.CTkFrame):
             have = self.canvas.winfo_height()
             if need > have:
                 self.vsb.pack(side="right", fill="y")
+                self._wheel_on = True
             else:
                 self.vsb.pack_forget()
                 self.canvas.yview_moveto(0)
+                self._wheel_on = False
             self.update_idletasks()
-            # stretch inner width
             self.canvas.itemconfigure(self._win, width=max(1, self.canvas.winfo_width()))
         except Exception:
             pass
+
+    def _on_wheel(self, event) -> None:
+        if not getattr(self, "_wheel_on", False):
+            return
+        self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
 
 class App(ctk.CTk):
@@ -827,6 +842,7 @@ class App(ctk.CTk):
         self._build_monitor()
         self._build_log()
         self.after(150, self._fit_scrollbar)
+        self.after(200, self._setup_wheel)
 
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.attributes("-topmost", bool(CFG.get("topmost", False)))
@@ -1065,9 +1081,19 @@ class App(ctk.CTk):
     def _refresh_monitor(self) -> None:
         use_gpu = CFG.get("device_choice", "cpu") == "gpu"
         L = self._mon_labels
-        L["model"].configure(text=f"{CFG.get('model')} / {'GPU' if use_gpu else 'CPU'}")
+        dev = gpu_info.gpu_name() if use_gpu else gpu_info.cpu_name()
+        if not dev:
+            dev = "GPU" if use_gpu else "CPU"
+        L["model"].configure(text=f"{CFG.get('model')} / {dev}")
 
+        gpu_keys = ("gpu_mem", "gpu_util", "gpu_temp", "gpu_power")
         if use_gpu and gpu_info.has_nvidia():
+            for k in gpu_keys:
+                if hasattr(L[k], "master"):
+                    try:
+                        L[k].master.pack(fill="x", padx=12, pady=2)
+                    except Exception:
+                        pass
             try:
                 m = gpu_info.gpu_metrics()
                 used = m["used_mb"] / 1024
@@ -1083,11 +1109,14 @@ class App(ctk.CTk):
                     text=f"{m['power_w']:.0f} W" if m["power_w"] is not None else t("mon_na")
                 )
             except Exception:
-                for k in ("gpu_mem", "gpu_util", "gpu_temp", "gpu_power"):
+                for k in gpu_keys:
                     L[k].configure(text=t("mon_na"))
         else:
-            for k in ("gpu_mem", "gpu_util", "gpu_temp", "gpu_power"):
-                L[k].configure(text=t("mon_na"))
+            for k in gpu_keys:
+                try:
+                    L[k].master.pack_forget()
+                except Exception:
+                    pass
 
         pct, used_gb = gpu_info.cpu_ram()
         cl = gpu_info.cpu_load()
@@ -1110,6 +1139,86 @@ class App(ctk.CTk):
             self.after(2000, self._monitor_loop)
         except Exception:
             pass
+
+    def _setup_wheel(self) -> None:
+        try:
+            self.bind_all("<MouseWheel>", self._on_global_wheel, add="+")
+        except Exception:
+            pass
+
+    def _log_text_widget(self):
+        def find(w):
+            if w.__class__.__name__ == "Text":
+                return w
+            for c in w.winfo_children():
+                r = find(c)
+                if r is not None:
+                    return r
+            return None
+
+        return find(self.log)
+
+    def _pointer_over_log(self, x, y) -> bool:
+        w = self.winfo_containing(x, y)
+        while w is not None:
+            if w is self.log:
+                return True
+            w = getattr(w, "master", None)
+        return False
+
+    def _scroll_log_chained(self, units: int):
+        """Scroll log; return 'edge' when at top/bottom so page can scroll."""
+        text = self._log_text_widget()
+        if text is None:
+            return None
+        try:
+            first, last = text.yview()
+        except Exception:
+            return None
+        if units < 0 and last >= 0.999:
+            return "edge"
+        if units > 0 and first <= 0.001:
+            return "edge"
+        try:
+            text.yview_scroll(units, "units")
+            return "ok"
+        except Exception:
+            return None
+
+    def _on_global_wheel(self, event):
+        # ignore wheel over other toplevels (settings, compact)
+        try:
+            top = self.winfo_toplevel()
+            w = self.winfo_containing(event.x_root, event.y_root)
+            while w is not None:
+                if w is not top and isinstance(w, ctk.CTkToplevel):
+                    return None
+                w = getattr(w, "master", None)
+        except Exception:
+            pass
+
+        units = int(-1 * (event.delta / 120))
+
+        if self._pointer_over_log(event.x_root, event.y_root):
+            res = self._scroll_log_chained(units)
+            if res == "ok":
+                return "break"
+            if getattr(self._content, "_wheel_on", False):
+                self._content.canvas.yview_scroll(units, "units")
+            return "break"
+
+        if getattr(self._content, "_wheel_on", False):
+            w = self.winfo_containing(event.x_root, event.y_root)
+            inside = False
+            while w is not None:
+                if w is self._content:
+                    inside = True
+                    break
+                w = getattr(w, "master", None)
+            if inside:
+                self._content.canvas.yview_scroll(units, "units")
+                return "break"
+        return None
 
     def _fit_scrollbar(self) -> None:
         try:
@@ -1453,6 +1562,7 @@ class SettingsWindow(ctk.CTkToplevel):
 
         self._build()
         self._refresh_model_status()
+        self._bind_settings_wheel()
         self.protocol("WM_DELETE_WINDOW", self._close)
 
     def _build(self) -> None:
@@ -1635,9 +1745,11 @@ class SettingsWindow(ctk.CTkToplevel):
 
         self._device_var = ctk.StringVar(value=CFG.get("device_choice", "cpu"))
         nvidia = gpu_info.has_nvidia()
+        gpu_label = f'{t("device_gpu")} · {gpu_info.gpu_name() or "NVIDIA"}'
+        cpu_label = f'{t("device_cpu")} · {gpu_info.cpu_name()}'
         self.rad_gpu = ctk.CTkRadioButton(
             mod,
-            text=t("device_gpu"),
+            text=gpu_label,
             variable=self._device_var,
             value="gpu",
             font=ctk.CTkFont(family=BODY, size=12),
@@ -1647,7 +1759,7 @@ class SettingsWindow(ctk.CTkToplevel):
         self.rad_gpu.pack(anchor="w", padx=14, pady=2)
         self.rad_cpu = ctk.CTkRadioButton(
             mod,
-            text=t("device_cpu"),
+            text=cpu_label,
             variable=self._device_var,
             value="cpu",
             font=ctk.CTkFont(family=BODY, size=12),
@@ -1655,6 +1767,11 @@ class SettingsWindow(ctk.CTkToplevel):
             fg_color=T["red"],
         )
         self.rad_cpu.pack(anchor="w", padx=14, pady=2)
+
+        def _on_device_change() -> None:
+            self.lbl_vram.configure(text=_vram_text())
+
+        self._device_var.trace_add("write", lambda *_: _on_device_change())
 
         if not nvidia:
             self.rad_gpu.configure(state="disabled", text_color=T["faint"])
@@ -1669,6 +1786,8 @@ class SettingsWindow(ctk.CTkToplevel):
             tip.pack(fill="x", padx=28, pady=(0, 6))
 
         def _vram_text() -> str:
+            if self._device_var.get() == "cpu":
+                return t("set_model_vram_cpu")
             name = self.cmb_model.get()
             est = gpu_info.VRAM_ESTIMATE_GB.get(name, 1.0)
             return f"{t('set_model_vram')}: ~{est:g} {t('mon_gb')}"
@@ -1949,6 +2068,54 @@ class SettingsWindow(ctk.CTkToplevel):
             return
         self.after(400, self.app.on_close)
 
+    def _bind_settings_wheel(self) -> None:
+        """Scroll settings with mouse wheel; do not scroll past content edges."""
+
+        def _on_wheel(event):
+            # only when pointer is inside this settings window
+            w = self.winfo_containing(event.x_root, event.y_root)
+            inside = False
+            while w is not None:
+                if w is self:
+                    inside = True
+                    break
+                w = getattr(w, "master", None)
+            if not inside:
+                return None
+
+            units = int(-1 * (event.delta / 120))
+            # find scrollable canvas
+            target = self.winfo_containing(event.x_root, event.y_root)
+            canvas = None
+            w = target
+            while w is not None:
+                if isinstance(w, ctk.CTkScrollableFrame):
+                    try:
+                        canvas = w._parent_canvas
+                    except Exception:
+                        canvas = None
+                    break
+                w = getattr(w, "master", None)
+            if canvas is None:
+                return None
+
+            try:
+                first, last = canvas.yview()
+            except Exception:
+                return None
+            # clamp — no empty space above or below
+            if units < 0 and last >= 0.999:
+                return "break"
+            if units > 0 and first <= 0.001:
+                return "break"
+            try:
+                canvas.yview_scroll(units, "units")
+            except Exception:
+                pass
+            return "break"
+
+        self.bind_all("<MouseWheel>", _on_wheel, add="+")
+
     def _hk_label(self) -> str:
         if self._capturing_hotkey:
             return t("set_hotkey_capture")
@@ -2162,7 +2329,22 @@ class SettingsWindow(ctk.CTkToplevel):
         CFG["language"] = speech_lang
         CFG["ui_language"] = ui_lang
         CFG["max_record_seconds"] = new_max
+        old_device = CFG.get("device_choice")
         CFG["device_choice"] = self._device_var.get()
+        if old_device != CFG["device_choice"]:
+            dev_name = (
+                gpu_info.gpu_name() or "GPU"
+                if CFG["device_choice"] == "gpu"
+                else gpu_info.cpu_name()
+            )
+            self.app.on_log("info", t("log_device_changed", device=dev_name))
+            try:
+                # reload model on device change
+                _state["model"] = None
+                _state["model_name_loaded"] = None
+                threading.Thread(target=_load_model, daemon=True).start()
+            except Exception:
+                pass
         CFG["topmost"] = bool(self.chk_top.get())
         CFG["compact_on_start"] = bool(self.chk_compact.get())
         save_config(CFG)

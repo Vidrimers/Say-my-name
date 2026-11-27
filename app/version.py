@@ -15,7 +15,7 @@ import time
 import zipfile
 from pathlib import Path
 
-__version__ = "2026.11.27"
+__version__ = "2026.11.28"
 
 REPO = "Vidrimers/Say-my-name"
 RELEASES_API = f"https://api.github.com/repos/{REPO}/releases/latest"

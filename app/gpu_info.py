@@ -150,3 +150,26 @@ def cpu_load() -> float | None:
         return max(0.0, min(100.0, 100.0 * (1.0 - di / dt)))
     except Exception:
         return None
+
+
+def cpu_name() -> str:
+    try:
+        import winreg
+
+        key = winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE,
+            r"HARDWARE\DESCRIPTION\System\CentralProcessor\0",
+        )
+        val, _ = winreg.QueryValueEx(key, "ProcessorNameString")
+        winreg.CloseKey(key)
+        n = str(val).strip()
+        if n:
+            return n
+    except Exception:
+        pass
+    try:
+        import platform
+
+        return platform.processor() or "CPU"
+    except Exception:
+        return "CPU"
