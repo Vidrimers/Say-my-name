@@ -167,6 +167,8 @@ DEFAULT_CONFIG = {
     "autostart_win": False,
     "journal_enable": True,
     "processes": [],
+    "win_main": None,
+    "win_compact": None,
     "silence_sec": 2.0,
     "device_choice": "auto",
     "topmost": False,
@@ -827,13 +829,17 @@ class CompactWindow:
 
         self.win.configure(bg="#1c1c28")
 
-        try:
-            sw = self.win.winfo_screenwidth()
-            sh = self.win.winfo_screenheight()
-            x = max(0, (sw - self.W) // 2)
-            y = max(0, (sh - self.H) // 2)
-        except Exception:
-            x, y = 120, 120
+        _g = CFG.get("win_compact")
+        if isinstance(_g, dict) and "x" in _g and "y" in _g:
+            x, y = int(_g["x"]), int(_g["y"])
+        else:
+            try:
+                sw = self.win.winfo_screenwidth()
+                sh = self.win.winfo_screenheight()
+                x = max(0, (sw - self.W) // 2)
+                y = max(0, (sh - self.H) // 2)
+            except Exception:
+                x, y = 120, 120
         self.win.geometry(f"{self.W}x{self.H}+{x}+{y}")
 
         self._drag = {"x": 0, "y": 0, "moved": False, "press_x": 0, "press_y": 0}
@@ -1071,6 +1077,7 @@ class CompactWindow:
         if self._click_after is not None:
             self.win.after_cancel(self._click_after)
             self._click_after = None
+            self._save_pos()
             self.app.show_main()
             return
         self._click_after = self.win.after(280, self._single_click)
@@ -1087,6 +1094,7 @@ class CompactWindow:
         )
 
     def destroy(self) -> None:
+        self._save_pos()
         if self._blink_after is not None:
             try:
                 self.win.after_cancel(self._blink_after)
@@ -1094,6 +1102,16 @@ class CompactWindow:
                 pass
         try:
             self.win.destroy()
+        except Exception:
+            pass
+
+    def _save_pos(self) -> None:
+        try:
+            CFG["win_compact"] = {
+                "x": self.win.winfo_x(),
+                "y": self.win.winfo_y(),
+            }
+            save_config(CFG)
         except Exception:
             pass
 
@@ -1205,6 +1223,15 @@ class App(ctk.CTk):
         self._build_footer()
         self._content = ScrollFrame(self)
         self._content.pack(fill="both", expand=True)
+        try:
+            _g = CFG.get("win_main")
+            if isinstance(_g, dict) and _g.get("w") and _g.get("h"):
+                self.geometry(
+                    f"{_g['w']}x{_g['h']}+{_g.get('x', 100)}+{_g.get('y', 100)}"
+                )
+        except Exception:
+            pass
+
         self._build_header()
         self._build_status()
         self._build_controls()
@@ -2008,10 +2035,25 @@ class App(ctk.CTk):
             pass
         self.on_close()
 
+    def _save_geometry(self) -> None:
+        try:
+            if str(self.state()) != "normal":
+                return
+            CFG["win_main"] = {
+                "x": self.winfo_x(),
+                "y": self.winfo_y(),
+                "w": self.winfo_width(),
+                "h": self.winfo_height(),
+            }
+            save_config(CFG)
+        except Exception:
+            pass
+
     def on_close(self) -> None:
         if CFG.get("close_to_tray") and not getattr(self, "_really_quit", False):
             self._to_tray()
             return
+        self._save_geometry()
         try:
             keyboard.unhook_all()
         except Exception:
@@ -2144,6 +2186,11 @@ class ProcessesWindow(ctk.CTkToplevel):
         self.maxsize(520, 520)
         self.resizable(False, False)
         self.configure(fg_color=T["bg"])
+        try:
+            _mx, _my = app.winfo_x(), app.winfo_y()
+            self.geometry(f"520x520+{_mx + 60}+{_my + 60}")
+        except Exception:
+            pass
         try:
             self.grab_set()
             self.transient(app)
@@ -2593,6 +2640,11 @@ class SettingsWindow(ctk.CTkToplevel):
             user32.SetWindowLongW(
                 hwnd, GWL_STYLE, style & ~WS_MAXIMIZEBOX & ~WS_THICKFRAME
             )
+        except Exception:
+            pass
+        try:
+            _mx, _my = app.winfo_x(), app.winfo_y()
+            self.geometry(f"440x640+{_mx + 40}+{_my + 40}")
         except Exception:
             pass
         self.grab_set()
