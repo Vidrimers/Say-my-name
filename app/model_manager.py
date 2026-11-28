@@ -74,7 +74,7 @@ def download_model(
     on_progress: Callable[[int], None] | None = None,
     on_done: Callable[[bool, str | None], None] | None = None,
 ) -> bool:
-    """Download in a daemon thread. Returns False if already in progress."""
+    """Download in a daemon thread with real progress. Returns False if busy."""
     if size not in _REPO and size not in MODEL_SIZES:
         if on_done:
             on_done(False, f"unknown model: {size}")
@@ -87,21 +87,22 @@ def download_model(
     def _worker() -> None:
         try:
             from huggingface_hub import snapshot_download
+            from tqdm import tqdm
 
             rid = repo_id(size)
+            last = {"pct": -1}
 
-            def _hf_progress(bar) -> None:
-                # bar: tqdm-like with total/n
-                if on_progress and bar.total:
-                    pct = int(bar.n * 100 / bar.total)
-                    on_progress(pct)
+            class Progress(tqdm):
+                def update(self, n=1):
+                    r = super().update(n)
+                    if on_progress and getattr(self, "total", None):
+                        pct = min(100, max(0, int(self.n * 100 / self.total)))
+                        if pct != last["pct"]:
+                            last["pct"] = pct
+                            on_progress(pct)
+                    return r
 
-            # progress via tqdm hooks is awkward; use simple end callback + intermediate
-            snapshot_download(
-                repo_id=rid,
-                # local_dir not used — default HF cache
-            )
-            # after success, poll-free: report 100
+            snapshot_download(repo_id=rid, tqdm_class=Progress)
             if on_progress:
                 on_progress(100)
             if on_done:
@@ -113,43 +114,34 @@ def download_model(
             with _download_lock:
                 _active[size] = False
 
-    # Better progress: use tqdm from huggingface
-    def _worker_progress() -> None:
-        try:
-            from huggingface_hub import snapshot_download
-            import tqdm as tqdm_mod
-
-            rid = repo_id(size)
-            orig_init = tqdm_mod.tqdm.__init__
-
-            def patched_init(self, *args, **kwargs):
-                orig_init(self, *args, **kwargs)
-                if on_progress and getattr(self, "total", None):
-                    # hook update
-                    orig_update = self.update
-
-                    def upd(n=1):
-                        orig_update(n)
-                        if self.total:
-                            on_progress(int(self.n * 100 / self.total))
-
-                    self.update = upd  # type: ignore[method-assign]
-
-            tqdm_mod.tqdm.__init__ = patched_init  # type: ignore[method-assign]
-            try:
-                snapshot_download(repo_id=rid)
-            finally:
-                tqdm_mod.tqdm.__init__ = orig_init  # type: ignore[method-assign]
-            if on_progress:
-                on_progress(100)
-            if on_done:
-                on_done(True, None)
-        except Exception as e:  # noqa: BLE001
-            if on_done:
-                on_done(False, str(e))
-        finally:
-            with _download_lock:
-                _active[size] = False
-
-    threading.Thread(target=_worker_progress, daemon=True).start()
+    threading.Thread(target=_worker, daemon=True).start()
     return True
+
+
+def delete_model(size: str) -> None:
+    """Remove downloaded faster-whisper model from HF cache."""
+    d = model_dir(size)
+    if d.exists():
+        import shutil
+
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def folder_size_bytes(path: Path) -> int:
+    if not path.exists():
+        return 0
+    return sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
+
+
+def human_size(n: int) -> str:
+    gb = n / (1024**3)
+    if gb >= 1:
+        return f"{gb:.2f} GB"
+    mb = n / (1024**2)
+    if mb >= 1:
+        return f"{mb:.0f} MB"
+    return f"{n} B"
+
+
+def model_size_label(size: str) -> str:
+    return human_size(folder_size_bytes(model_dir(size)))

@@ -8,3 +8,5 @@ qrcode
 customtkinter
 Pillow
 pystray
+transformers
+sentencepiece

@@ -149,6 +149,8 @@ from i18n import t
 import model_manager as mm
 import version as app_version
 import gpu_info
+import mt_models
+import mt_translate
 
 DEFAULT_CONFIG = {
     "hotkey": "ctrl+alt+space",
@@ -167,6 +169,16 @@ DEFAULT_CONFIG = {
     "autostart_win": False,
     "journal_enable": True,
     "processes": [],
+    "tr_enable": False,
+    "tr_mode": "api",
+    "tr_provider": "mimo",
+    "tr_api_key": "",
+    "tr_base_url": "",
+    "tr_model": "",
+    "tr_lang_to": "auto",
+    "tr_keep_model": False,
+    "tr_local_model": "opus-mt-en-ru",
+    "tr_device": "auto",
     "win_main": None,
     "win_compact": None,
     "silence_sec": 2.0,
@@ -385,6 +397,19 @@ def _stop_and_process() -> None:
         if not text:
             _emit("warn", "log_empty")
             return
+        if CFG.get("tr_enable"):
+            try:
+                _emit("info", "log_translating")
+                text = mt_translate.translate(text, CFG)
+                _emit("text", text)
+            except Exception as e:
+                err = str(e)
+                if "NO_TORCH" in err:
+                    _emit("error", "log_tr_no_torch")
+                elif "NOT_DOWNLOADED" in err:
+                    _emit("error", "log_tr_no_model")
+                else:
+                    _emit("error", "log_tr_fail", err=err)
         _emit("text", text)
         _paste_text(text)
         _journal_append(text)
@@ -1032,6 +1057,24 @@ class CompactWindow:
                 command=pick_silence,
             )
 
+        # translate toggle (synced with settings) — separate section
+        menu.add_separator()
+        tr_on = bool(CFG.get("tr_enable", False))
+        tr_txt = t("tr_enable")
+
+        def pick_tr() -> None:
+            CFG["tr_enable"] = not bool(CFG.get("tr_enable", False))
+            save_config(CFG)
+            self.app.on_log(
+                "info",
+                t("log_tr_toggle", on=t("on") if CFG["tr_enable"] else t("off")),
+            )
+
+        menu.add_command(
+            label=("✓ " if tr_on else "    ") + tr_txt,
+            command=pick_tr,
+        )
+
         menu.add_separator()
         menu.add_command(label=t("ctx_exit"), command=self.app.on_close)
 
@@ -1334,11 +1377,27 @@ class App(ctk.CTk):
         self.status_sub.pack(fill="x", pady=(2, 0))
 
     def _idle_hint(self) -> str:
+        model = CFG.get("model", "")
+        if not CFG.get("tr_enable"):
+            return t(
+                "status_idle_hint",
+                hotkey=CFG.get("hotkey", ""),
+                lang=CFG.get("language", ""),
+                model=model,
+            )
+        # translation active — show what translates
+        mode = CFG.get("tr_mode", "api")
+        if mode == "local":
+            tr = CFG.get("tr_local_model", "")
+        else:
+            prov = CFG.get("tr_provider", "deepl")
+            m = CFG.get("tr_model", "")
+            tr = f"{prov}:{m}" if m else prov
         return t(
-            "status_idle_hint",
+            "status_idle_hint_tr",
             hotkey=CFG.get("hotkey", ""),
-            lang=CFG.get("language", ""),
-            model=CFG.get("model", ""),
+            model=model,
+            tr=tr,
         )
 
     def _build_controls(self) -> None:
@@ -2602,6 +2661,13 @@ class ProcessesWindow(ctk.CTkToplevel):
         save_config(CFG)
         self.app.refresh_processes_count()
         self.app.on_log("ok", t("set_saved"))
+        if CFG.get("tr_enable"):
+            name = (
+                CFG.get("tr_local_model")
+                if CFG.get("tr_mode") == "local"
+                else CFG.get("tr_provider")
+            )
+            self.app.on_log("info", t("log_tr_model", name=name or "-"))
         self._close()
 
     def _close(self) -> None:
@@ -2620,9 +2686,9 @@ class SettingsWindow(ctk.CTkToplevel):
         self._from_compact = from_compact
         self.title(t("settings_title"))
         # 125% DPI: 440×640 logical → 550×800 physical (height = main window)
-        self.geometry("440x640")
-        self.minsize(440, 640)
-        self.maxsize(440, 640)
+        self.geometry("480x680")
+        self.minsize(480, 680)
+        self.maxsize(480, 680)
         self.resizable(False, False)
         try:
             self.attributes("-zoomed", False)
@@ -2832,6 +2898,8 @@ class SettingsWindow(ctk.CTkToplevel):
 
         # --- 2. Model ---
         mod = accordion("model", t("set_model"))
+
+        # 1) model select
         m_row = ctk.CTkFrame(mod, fg_color="transparent")
         m_row.pack(fill="x", padx=14, pady=(12, 4))
         self.cmb_model = ctk.CTkOptionMenu(
@@ -2849,14 +2917,59 @@ class SettingsWindow(ctk.CTkToplevel):
         self.cmb_model.set(CFG.get("model", "small"))
         self.cmb_model.pack(side="left")
 
+        # 2) status + download / delete
+        d_row = ctk.CTkFrame(mod, fg_color="transparent")
+        d_row.pack(fill="x", padx=14, pady=(6, 2))
+        self.d_row = d_row
         self.lbl_model_state = ctk.CTkLabel(
-            m_row,
-            text="",
-            anchor="w",
-            font=ctk.CTkFont(family=BODY, size=11),
+            d_row, text="", anchor="w", font=ctk.CTkFont(family=BODY, size=11)
         )
-        self.lbl_model_state.pack(side="left", padx=10)
+        self.lbl_model_state.pack(side="left")
 
+        self.btn_dl = ctk.CTkButton(
+            d_row,
+            text=t("set_download"),
+            width=100,
+            height=28,
+            corner_radius=0,
+            fg_color=T["panel"],
+            hover_color="#243038",
+            border_width=1,
+            border_color=T["line"],
+            text_color=T["text"],
+            font=ctk.CTkFont(family=BODY, size=11),
+            command=self._start_download,
+        )
+        self.btn_dl.pack(side="right", padx=(6, 0))
+
+        self.btn_del_model = ctk.CTkButton(
+            d_row,
+            text=t("set_delete"),
+            width=80,
+            height=28,
+            corner_radius=0,
+            fg_color="transparent",
+            hover_color=T["line"],
+            border_width=1,
+            border_color=T["line"],
+            text_color=T["faint"],
+            font=ctk.CTkFont(family=BODY, size=11),
+            command=self._delete_model,
+        )
+        self.btn_del_model.pack(side="right", padx=(0, 6))
+
+        # 3) progress
+        self.pbar = ctk.CTkProgressBar(
+            mod, height=4, corner_radius=0, progress_color=T["red"]
+        )
+        self.pbar.pack(fill="x", padx=14, pady=(4, 2))
+        self.pbar.set(0)
+        self.lbl_dl = ctk.CTkLabel(
+            mod, text="", anchor="w", font=ctk.CTkFont(family=BODY, size=11)
+        )
+        self.lbl_dl.pack(fill="x", padx=14, pady=(0, 4))
+
+        # 4) vram estimate
         self.lbl_vram = ctk.CTkLabel(
             mod,
             text="",
@@ -2866,6 +2979,7 @@ class SettingsWindow(ctk.CTkToplevel):
         )
         self.lbl_vram.pack(fill="x", padx=14, pady=(2, 2))
 
+        # 5) device
         ctk.CTkLabel(
             mod,
             text=t("set_device"),
@@ -2931,34 +3045,7 @@ class SettingsWindow(ctk.CTkToplevel):
 
         self.cmb_model.configure(command=_on_model_change2)
 
-        d_row = ctk.CTkFrame(mod, fg_color="transparent")
-        d_row.pack(fill="x", padx=14, pady=(4, 2))
-        self.btn_dl = ctk.CTkButton(
-            d_row,
-            text=t("set_download"),
-            width=110,
-            height=30,
-            corner_radius=0,
-            fg_color=T["panel"],
-            hover_color="#243038",
-            border_width=1,
-            border_color=T["line"],
-            text_color=T["text"],
-            font=ctk.CTkFont(family=BODY, size=11),
-            command=self._start_download,
-        )
-        self.btn_dl.pack(side="left")
-        self.lbl_dl = ctk.CTkLabel(
-            d_row, text="", anchor="w", font=ctk.CTkFont(family=BODY, size=11)
-        )
-        self.lbl_dl.pack(side="left", padx=10)
-
-        self.pbar = ctk.CTkProgressBar(
-            mod, height=4, corner_radius=0, progress_color=T["red"]
-        )
-        self.pbar.pack(fill="x", padx=14, pady=(4, 8))
-        self.pbar.set(0)
-
+        # 6) path + open folder
         ctk.CTkLabel(
             mod,
             text=t("set_models_path"),
@@ -3183,6 +3270,99 @@ class SettingsWindow(ctk.CTkToplevel):
             justify="left",
         ).pack(anchor="w", padx=14, pady=(0, 12))
 
+        # --- 4.5 Translation ---
+        tr = accordion("translation", t("set_translation"))
+
+        self.chk_tr_enable = ctk.CTkCheckBox(
+            tr,
+            text=t("tr_enable"),
+            corner_radius=0,
+            fg_color=T["red"],
+            hover_color="#D92222",
+            text_color=T["text"],
+            font=ctk.CTkFont(family=BODY, size=12),
+        )
+        if CFG.get("tr_enable"):
+            self.chk_tr_enable.select()
+        self.chk_tr_enable.pack(anchor="w", padx=14, pady=(12, 4))
+
+        # show install hint only when torch is missing
+        try:
+            import torch  # noqa: F401
+
+            torch_ok = True
+        except Exception:
+            torch_ok = False
+        if not torch_ok:
+            warn_row = ctk.CTkFrame(tr, fg_color="transparent")
+            warn_row.pack(fill="x", padx=14, pady=(2, 6))
+            ctk.CTkLabel(
+                warn_row,
+                text=t("tr_torch_warn"),
+                text_color=T["amber"],
+                font=ctk.CTkFont(family=BODY, size=10),
+                wraplength=300,
+                justify="left",
+                anchor="w",
+            ).pack(side="left", fill="x", expand=True)
+            ctk.CTkButton(
+                warn_row,
+                text=t("tr_torch_install"),
+                width=90,
+                height=26,
+                corner_radius=0,
+                fg_color=T["red"],
+                hover_color="#D92222",
+                text_color="#FFFFFF",
+                font=ctk.CTkFont(family=BODY, size=11),
+                command=self._install_torch,
+            ).pack(side="right", padx=(8, 0))
+
+        ctk.CTkLabel(
+            tr,
+            text=t("tr_provider"),
+            anchor="w",
+            font=ctk.CTkFont(family=DISPLAY, size=12, weight="bold"),
+            text_color=T["muted"],
+        ).pack(fill="x", padx=14, pady=(10, 4))
+
+        self._tr_mode = ctk.StringVar(value=CFG.get("tr_mode", "api"))
+        self._tr_mode_rbs = []
+        r_api = ctk.CTkRadioButton(
+            tr,
+            text=t("tr_mode_api"),
+            variable=self._tr_mode,
+            value="api",
+            font=ctk.CTkFont(family=BODY, size=12),
+            fg_color=T["red"],
+            command=self._sync_tr_mode,
+        )
+        r_api.pack(anchor="w", padx=14, pady=2)
+        self._tr_mode_rbs.append(r_api)
+        r_local = ctk.CTkRadioButton(
+            tr,
+            text=t("tr_mode_local"),
+            variable=self._tr_mode,
+            value="local",
+            font=ctk.CTkFont(family=BODY, size=12),
+            fg_color=T["red"],
+            command=self._sync_tr_mode,
+        )
+        r_local.pack(anchor="w", padx=14, pady=(2, 8))
+        self._tr_mode_rbs.append(r_local)
+
+        # placeholder sections — filled by T18 / T19
+        self.tr_api_box = ctk.CTkFrame(tr, fg_color="transparent")
+        self.tr_local_box = ctk.CTkFrame(tr, fg_color="transparent")
+        self._build_tr_api(self.tr_api_box)
+        self._build_tr_local(self.tr_local_box)
+        self._sync_tr_mode()
+        self._tr_boxes = [self.tr_api_box, self.tr_local_box]
+        self.chk_tr_enable.configure(
+            command=self._sync_tr_enable
+        )
+        self._sync_tr_enable()
+
         # --- 5. Updates (no accordion) ---
         ctk.CTkLabel(
             outer,
@@ -3351,6 +3531,544 @@ class SettingsWindow(ctk.CTkToplevel):
 
         self.bind_all("<MouseWheel>", _on_wheel, add="+")
 
+    def _build_tr_api(self, box) -> None:
+        ctk.CTkLabel(
+            box,
+            text=t("tr_provider"),
+            anchor="w",
+            font=ctk.CTkFont(family=BODY, size=12),
+            text_color=T["muted"],
+        ).pack(fill="x", padx=14, pady=(4, 2))
+
+        provs = [
+            ("deepl", t("tr_prov_deepl")),
+            ("openai", t("tr_prov_openai")),
+            ("claude", t("tr_prov_claude")),
+            ("gemini", t("tr_prov_gemini")),
+            ("openrouter", t("tr_prov_openrouter")),
+            ("mimo", t("tr_prov_mimo")),
+            ("custom", t("tr_prov_custom")),
+        ]
+        self._tr_prov_ids = [k for k, _ in provs]
+        self._tr_prov_names = {k: n for k, n in provs}
+
+        self.cmb_tr_prov = ctk.CTkOptionMenu(
+            box,
+            values=[n for _, n in provs],
+            width=220,
+            corner_radius=0,
+            fg_color=T["panel"],
+            button_color=T["line"],
+            text_color=T["text"],
+            font=ctk.CTkFont(family=BODY, size=12),
+            command=self._on_tr_prov,
+        )
+        cur = CFG.get("tr_provider", "deepl")
+        if cur not in self._tr_prov_ids:
+            cur = "deepl"
+        self.cmb_tr_prov.set(self._tr_prov_names[cur])
+        self.cmb_tr_prov.pack(anchor="w", padx=14, pady=(0, 6))
+
+        # Base URL (custom / openai-compatible)
+        self.lbl_base = ctk.CTkLabel(
+            box,
+            text=t("tr_base_url"),
+            anchor="w",
+            font=ctk.CTkFont(family=BODY, size=12),
+            text_color=T["muted"],
+        )
+        self.ent_base = ctk.CTkEntry(
+            box,
+            placeholder_text=t("tr_base_url_ph"),
+            corner_radius=0,
+            fg_color=T["panel"],
+            border_color=T["line"],
+            text_color=T["text"],
+            font=ctk.CTkFont(family=BODY, size=12),
+        )
+        self.ent_base.insert(0, CFG.get("tr_base_url", ""))
+        self.ent_base.bind("<FocusOut>", lambda _e: self._tr_url_visible())
+
+        self.lbl_model = ctk.CTkLabel(
+            box,
+            text=t("tr_model_name"),
+            anchor="w",
+            font=ctk.CTkFont(family=BODY, size=12),
+            text_color=T["muted"],
+        )
+        self.ent_tr_model = ctk.CTkEntry(
+            box,
+            placeholder_text=t("tr_model_name_ph"),
+            corner_radius=0,
+            fg_color=T["panel"],
+            border_color=T["line"],
+            text_color=T["text"],
+            font=ctk.CTkFont(family=BODY, size=12),
+        )
+        self.ent_tr_model.insert(0, CFG.get("tr_model", ""))
+
+        ctk.CTkLabel(
+            box,
+            text=t("tr_api_key"),
+            anchor="w",
+            font=ctk.CTkFont(family=BODY, size=12),
+            text_color=T["muted"],
+        ).pack(fill="x", padx=14, pady=(6, 2))
+        self.ent_tr_key = ctk.CTkEntry(
+            box,
+            placeholder_text=t("tr_api_key_ph"),
+            corner_radius=0,
+            fg_color=T["panel"],
+            border_color=T["line"],
+            text_color=T["text"],
+            font=ctk.CTkFont(family=BODY, size=12),
+            show="*",
+        )
+        self.ent_tr_key.insert(0, CFG.get("tr_api_key", ""))
+        self.ent_tr_key.pack(fill="x", padx=14, pady=(0, 8))
+
+        # test row
+        t_row = ctk.CTkFrame(box, fg_color="transparent")
+        t_row.pack(fill="x", padx=14, pady=(0, 6))
+        self.btn_tr_test = ctk.CTkButton(
+            t_row,
+            text=t("tr_test"),
+            width=90,
+            height=28,
+            corner_radius=0,
+            fg_color=T["panel"],
+            hover_color="#243038",
+            border_width=1,
+            border_color=T["line"],
+            text_color=T["text"],
+            font=ctk.CTkFont(family=BODY, size=11),
+            command=self._test_tr_api,
+        )
+        self.btn_tr_test.pack(side="left")
+        self.lbl_tr_test = ctk.CTkLabel(
+            t_row, text="", anchor="w", font=ctk.CTkFont(family=BODY, size=11)
+        )
+        self.lbl_tr_test.pack(side="left", padx=10)
+
+        ctk.CTkLabel(
+            box,
+            text=t("tr_lang_to"),
+            anchor="w",
+            font=ctk.CTkFont(family=BODY, size=12),
+            text_color=T["muted"],
+        ).pack(fill="x", padx=14, pady=(6, 2))
+        self.cmb_tr_lang = ctk.CTkOptionMenu(
+            box,
+            values=[t("tr_lang_auto"), "EN", "RU"],
+            width=160,
+            corner_radius=0,
+            fg_color=T["panel"],
+            button_color=T["line"],
+            text_color=T["text"],
+            font=ctk.CTkFont(family=BODY, size=12),
+        )
+        lang = CFG.get("tr_lang_to", "auto")
+        if lang == "en":
+            self.cmb_tr_lang.set("EN")
+        elif lang == "ru":
+            self.cmb_tr_lang.set("RU")
+        else:
+            self.cmb_tr_lang.set(t("tr_lang_auto"))
+        self.cmb_tr_lang.pack(anchor="w", padx=14, pady=(0, 8))
+
+
+        self._tr_url_visible()
+
+    def _current_tr_prov(self) -> str:
+        name = self.cmb_tr_prov.get()
+        for k, n in self._tr_prov_names.items():
+            if n == name:
+                return k
+        return "deepl"
+
+    def _tr_url_visible(self) -> None:
+        prov = self._current_tr_prov()
+        # base url for openai-style (openai/custom/openrouter/claude/gemini)
+        show = prov in ("custom", "openai", "openrouter", "claude", "gemini")
+        # model name for LLM providers
+        show_model = prov in ("custom", "openai", "openrouter", "claude", "gemini", "mimo")
+        if show:
+            self.lbl_base.pack(fill="x", padx=14, pady=(6, 2))
+            self.ent_base.pack(fill="x", padx=14, pady=(0, 6))
+        else:
+            self.lbl_base.pack_forget()
+            self.ent_base.pack_forget()
+        if show_model:
+            self.lbl_model.pack(fill="x", padx=14, pady=(2, 2))
+            self.ent_tr_model.pack(fill="x", padx=14, pady=(0, 6))
+        else:
+            self.lbl_model.pack_forget()
+            self.ent_tr_model.pack_forget()
+
+    def _on_tr_prov(self, _name: str) -> None:
+        self._tr_url_visible()
+
+    def _test_tr_api(self) -> None:
+        self.lbl_tr_test.configure(text="…", text_color=T["muted"])
+        cfg = self._tr_cfg_snapshot()
+
+        def worker() -> None:
+            try:
+                import mt_translate
+
+                mt_translate.translate_api("hello", cfg)
+                msg, color = t("tr_test_ok"), T["muted"]
+            except Exception as e:
+                msg, color = t("tr_test_fail", err=str(e)), T["faint"]
+
+            def done() -> None:
+                self.lbl_tr_test.configure(text=msg, text_color=color)
+
+            try:
+                self.after(0, done)
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _tr_cfg_snapshot(self) -> dict:
+        lang = self.cmb_tr_lang.get()
+        if lang == "EN":
+            lang_v = "en"
+        elif lang == "RU":
+            lang_v = "ru"
+        else:
+            lang_v = "auto"
+        return {
+            "tr_enable": True,
+            "tr_mode": "api",
+            "tr_provider": self._current_tr_prov(),
+            "tr_api_key": self.ent_tr_key.get().strip(),
+            "tr_base_url": self.ent_base.get().strip(),
+            "tr_model": self.ent_tr_model.get().strip(),
+            "tr_lang_to": lang_v,
+        }
+
+    def _build_tr_local(self, box) -> None:
+        ctk.CTkLabel(
+            box,
+            text=t("tr_local_desc"),
+            text_color=T["faint"],
+            font=ctk.CTkFont(family=BODY, size=11),
+            wraplength=380,
+            justify="left",
+        ).pack(fill="x", padx=14, pady=(4, 6))
+
+        ids = [m["id"] for m in mt_models.MT_MODELS]
+        cur = CFG.get("tr_local_model", ids[0])
+        if cur not in ids:
+            cur = ids[0]
+
+        self.cmb_tr_model = ctk.CTkOptionMenu(
+            box,
+            values=ids,
+            width=280,
+            corner_radius=0,
+            fg_color=T["panel"],
+            button_color=T["line"],
+            text_color=T["text"],
+            font=ctk.CTkFont(family=BODY, size=12),
+            command=self._on_tr_model,
+        )
+        self.cmb_tr_model.set(cur)
+        self.cmb_tr_model.pack(anchor="w", padx=14, pady=(0, 6))
+
+        self.lbl_tr_desc = ctk.CTkLabel(
+            box,
+            text="",
+            text_color=T["text"],
+            font=ctk.CTkFont(family=BODY, size=11),
+            wraplength=300,
+            justify="left",
+            anchor="w",
+        )
+        self.lbl_tr_desc.pack(fill="x", padx=14, pady=(0, 4))
+
+        st_row = ctk.CTkFrame(box, fg_color="transparent")
+        st_row.pack(fill="x", padx=14, pady=(2, 4))
+        self.lbl_tr_state = ctk.CTkLabel(
+            st_row, text="", anchor="w", font=ctk.CTkFont(family=BODY, size=11)
+        )
+        self.lbl_tr_state.pack(side="left")
+        self.btn_tr_dl = ctk.CTkButton(
+            st_row,
+            text=t("set_download"),
+            width=100,
+            height=28,
+            corner_radius=0,
+            fg_color=T["panel"],
+            hover_color="#243038",
+            border_width=1,
+            border_color=T["line"],
+            text_color=T["text"],
+            font=ctk.CTkFont(family=BODY, size=11),
+            command=self._download_tr_model,
+        )
+        self.btn_tr_dl.pack(side="right", padx=(6, 0))
+        self.btn_tr_del = ctk.CTkButton(
+            st_row,
+            text=t("set_delete"),
+            width=80,
+            height=28,
+            corner_radius=0,
+            fg_color="transparent",
+            hover_color=T["line"],
+            border_width=1,
+            border_color=T["line"],
+            text_color=T["faint"],
+            font=ctk.CTkFont(family=BODY, size=11),
+            command=self._delete_tr_model,
+        )
+        self.btn_tr_del.pack(side="right", padx=(0, 6))
+        self.pbar_tr = ctk.CTkProgressBar(box, height=4, corner_radius=0, progress_color=T["red"])
+        self.pbar_tr.pack(fill="x", padx=14, pady=(2, 6))
+        self.pbar_tr.set(0)
+
+        ctk.CTkLabel(
+            box,
+            text=t("set_open_folder"),
+            anchor="w",
+            font=ctk.CTkFont(family=DISPLAY, size=12, weight="bold"),
+            text_color=T["muted"],
+        ).pack(fill="x", padx=14, pady=(8, 4))
+        p_row = ctk.CTkFrame(box, fg_color="transparent")
+        p_row.pack(fill="x", padx=14, pady=(0, 6))
+        ctk.CTkLabel(
+            p_row,
+            text=str(mt_models.hf_cache_dir()),
+            anchor="w",
+            text_color=T["muted"],
+            font=ctk.CTkFont(family=BODY, size=10),
+        ).pack(side="left", fill="x", expand=True)
+        ctk.CTkButton(
+            p_row,
+            text=t("set_open_folder"),
+            width=110,
+            height=28,
+            corner_radius=0,
+            fg_color=T["panel"],
+            hover_color="#243038",
+            border_width=1,
+            border_color=T["line"],
+            text_color=T["text"],
+            font=ctk.CTkFont(family=BODY, size=11),
+            command=lambda: self._open_tr_folder(),
+        ).pack(side="right")
+
+        # device
+        ctk.CTkLabel(
+            box,
+            text=t("tr_device"),
+            anchor="w",
+            font=ctk.CTkFont(family=DISPLAY, size=12, weight="bold"),
+            text_color=T["muted"],
+        ).pack(fill="x", padx=14, pady=(8, 4))
+        self._tr_dev = ctk.StringVar(value=CFG.get("tr_device", "cpu"))
+        d_row = ctk.CTkFrame(box, fg_color="transparent")
+        d_row.pack(fill="x", padx=14, pady=(0, 10))
+        gpu_lbl = f'{t("device_gpu")} · {gpu_info.gpu_name() or "NVIDIA"}'
+        cpu_lbl = f'{t("device_cpu")} · {gpu_info.cpu_name()}'
+        for val, lbl in (("gpu", gpu_lbl), ("cpu", cpu_lbl)):
+            r = ctk.CTkRadioButton(
+                d_row,
+                text=lbl,
+                variable=self._tr_dev,
+                value=val,
+                font=ctk.CTkFont(family=BODY, size=12),
+                fg_color=T["red"],
+            )
+            r.pack(anchor="w", pady=1)
+
+        # keep-in-memory — local MT only
+        self.chk_tr_keep = ctk.CTkCheckBox(
+            box,
+            text=t("tr_keep_model"),
+            corner_radius=0,
+            fg_color=T["red"],
+            hover_color="#D92222",
+            text_color=T["text"],
+            font=ctk.CTkFont(family=BODY, size=12),
+        )
+        if CFG.get("tr_keep_model"):
+            self.chk_tr_keep.select()
+        self.chk_tr_keep.pack(anchor="w", padx=14, pady=(10, 2))
+        ctk.CTkLabel(
+            box,
+            text=t("tr_keep_hint"),
+            text_color=T["faint"],
+            font=ctk.CTkFont(family=BODY, size=10),
+            wraplength=360,
+            justify="left",
+        ).pack(anchor="w", padx=28, pady=(0, 8))
+
+        self._refresh_tr_model(cur)
+
+    def _on_tr_model(self, model_id: str) -> None:
+        self._refresh_tr_model(model_id)
+
+    def _refresh_tr_model(self, model_id: str) -> None:
+        m = mt_models.get(model_id)
+        if not m:
+            return
+        lang = i18n.get_lang()
+        self.lbl_tr_desc.configure(text=m.get(lang) or m.get("en", ""))
+        ok = mt_models.is_downloaded(model_id)
+        if ok:
+            try:
+                sz = mt_models.model_size_label(model_id)
+                state_txt = f"✓ {t('set_model_dl')} · {sz}"
+            except Exception:
+                state_txt = f"✓ {t('set_model_dl')}"
+            self.lbl_tr_state.configure(text=state_txt, text_color=T["muted"])
+            self.btn_tr_dl.pack_forget()
+            if not self.btn_tr_del.winfo_ismapped():
+                self.btn_tr_del.pack(side="right", padx=(0, 6))
+        else:
+            self.btn_tr_del.pack_forget()
+            self.lbl_tr_state.configure(
+                text=f"✗ {t('set_model_not_dl')} (~{m['gb']} GB)",
+                text_color=T["amber"],
+            )
+            if not self.btn_tr_dl.winfo_ismapped():
+                self.btn_tr_dl.pack(side="right", padx=(6, 0))
+
+    def _delete_tr_model(self) -> None:
+        mid = self.cmb_tr_model.get()
+        try:
+            mt_models.delete_model(mid)
+            self._refresh_tr_model(mid)
+            self.app.on_log("info", f"{t('set_delete')}: {mid}")
+        except Exception as e:
+            self.app.on_log("error", str(e))
+
+    def _open_tr_folder(self) -> None:
+        path = mt_models.hf_cache_dir()
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+            os.startfile(str(path))
+        except Exception:
+            pass
+
+    def _download_tr_model(self) -> None:
+        mid = self.cmb_tr_model.get()
+        m = mt_models.get(mid)
+        if not m:
+            return
+        self.btn_tr_dl.configure(state="disabled")
+        self.lbl_tr_state.configure(text=t("set_downloading", pct=0), text_color=T["amber"])
+
+        def worker() -> None:
+            try:
+                from huggingface_hub import snapshot_download
+
+                snapshot_download(m["repo"])
+                ok, err = True, None
+            except Exception as e:
+                ok, err = False, str(e)
+
+            def done() -> None:
+                self._refresh_tr_model(mid)
+                if ok:
+                    self.lbl_tr_state.configure(
+                        text=t("set_download_done"), text_color=T["muted"]
+                    )
+                else:
+                    self.lbl_tr_state.configure(
+                        text=t("set_download_fail", err=err), text_color=T["faint"]
+                    )
+
+            try:
+                self.after(0, done)
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _sync_tr_mode(self) -> None:
+        mode = self._tr_mode.get()
+        for w in list(self.tr_api_box.winfo_children()):
+            w.destroy()
+        for w in list(self.tr_local_box.winfo_children()):
+            w.destroy()
+        if mode == "api":
+            self.tr_local_box.pack_forget()
+            self._build_tr_api(self.tr_api_box)
+            self.tr_api_box.pack(fill="x", pady=(0, 8))
+        else:
+            self.tr_api_box.pack_forget()
+            self._build_tr_local(self.tr_local_box)
+            self.tr_local_box.pack(fill="x", pady=(0, 8))
+        try:
+            self._sync_tr_enable()
+        except Exception:
+            pass
+
+    def _sync_tr_enable(self, *_a) -> None:
+        """Gray out all translation controls when translate is off."""
+        on = True
+        try:
+            on = bool(self.chk_tr_enable.get())
+        except Exception:
+            on = True
+
+        state = "normal" if on else "disabled"
+        dim = T["muted"] if on else T["faint"]
+
+        # mode radios live outside the boxes — store them at build time
+        for wdg in getattr(self, "_tr_mode_rbs", []):
+            try:
+                wdg.configure(state=state)
+            except Exception:
+                pass
+
+        def walk(widget):
+            for c in widget.winfo_children():
+                try:
+                    cls = type(c).__name__
+                    if "RadioButton" in cls:
+                        c.configure(state=state)
+                    elif "Entry" in cls:
+                        c.configure(state=state)
+                    elif "OptionMenu" in cls:
+                        c.configure(state=state)
+                    elif "Button" in cls:
+                        c.configure(state=state)
+                    elif "CheckBox" in cls and c is not self.chk_tr_enable:
+                        c.configure(state=state)
+                    elif "Label" in cls:
+                        cur = c.cget("text_color")
+                        if cur in (T["muted"], T["faint"]):
+                            c.configure(text_color=dim)
+                except Exception:
+                    pass
+                walk(c)
+
+        for box in getattr(self, "_tr_boxes", []):
+            try:
+                walk(box)
+            except Exception:
+                pass
+
+    def _install_torch(self) -> None:
+        """Launch install_torch.bat next to the app root."""
+        try:
+            bat = APP_DIR.parent / "install_torch.bat"
+            if bat.exists():
+                subprocess.Popen(
+                    ["cmd", "/c", str(bat)],
+                    cwd=str(APP_DIR.parent),
+                    creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
+                )
+            else:
+                self.app.on_log("error", "install_torch.bat not found")
+        except Exception as e:
+            self.app.on_log("error", str(e))
+
     def _hk_label(self) -> str:
         if self._capturing_hotkey:
             return t("set_hotkey_capture")
@@ -3477,22 +4195,41 @@ class SettingsWindow(ctk.CTkToplevel):
     def _refresh_model_status(self, size: str | None = None) -> None:
         size = size or self.cmb_model.get()
         ok = mm.is_downloaded(size)
-        color = "#a6e3a1" if ok else "#f9e2af"
-        label = f"✓ {t('set_model_dl')}" if ok else f"✗ {t('set_model_not_dl')}"
+        color = T["muted"] if ok else T["amber"]
+        if ok:
+            try:
+                size_txt = mm.model_size_label(size)
+                label = f"✓ {t('set_model_dl')} · {size_txt}"
+            except Exception:
+                label = f"✓ {t('set_model_dl')}"
+        else:
+            label = f"✗ {t('set_model_not_dl')}"
         self.lbl_model_state.configure(text=label, text_color=color)
         if ok:
-            # no Download button for already-downloaded models
             self.btn_dl.pack_forget()
-            self.pbar.pack_forget()
-            self.lbl_dl.configure(text="")
-            self.pbar.set(1)
+            self.btn_del_model.pack(side="right", padx=(0, 6))
+            # keep progress bar in place (under status row), just full
+            try:
+                self.pbar.pack(fill="x", padx=14, pady=(4, 2), after=self.d_row)
+                self.pbar.set(1)
+                self.lbl_dl.pack(fill="x", padx=14, pady=(0, 4), after=self.pbar)
+                self.lbl_dl.configure(text="")
+            except Exception:
+                pass
         else:
-            if not self.btn_dl.winfo_ismapped():
-                self.btn_dl.pack(side="left")
-            if not self.pbar.winfo_ismapped():
-                self.pbar.pack(fill="x", pady=(4, 8))
-            self.btn_dl.configure(state="normal")
-            self.pbar.set(0)
+            self.btn_del_model.pack_forget()
+            self.btn_dl.pack(side="right", padx=(6, 0))
+            try:
+                self.pbar.pack(fill="x", padx=14, pady=(4, 2), after=self.d_row)
+                self.pbar.set(0)
+                self.lbl_dl.pack(fill="x", padx=14, pady=(0, 4), after=self.pbar)
+            except Exception:
+                pass
+        # VRAM estimate always visible after download row
+        try:
+            self.lbl_vram.pack(fill="x", padx=14, pady=(2, 2), after=self.lbl_dl)
+        except Exception:
+            pass
 
     def _start_download(self) -> None:
         size = self.cmb_model.get()
@@ -3525,6 +4262,15 @@ class SettingsWindow(ctk.CTkToplevel):
                 pass
 
         mm.download_model(size, on_progress=on_progress, on_done=on_done)
+
+    def _delete_model(self) -> None:
+        size = self.cmb_model.get()
+        try:
+            mm.delete_model(size)
+            self._refresh_model_status()
+            self.app.on_log("info", f"{t('set_delete')}: {size}")
+        except Exception as e:
+            self.app.on_log("error", str(e))
 
     def _open_folder(self) -> None:
         path = mm.models_root()
@@ -3571,6 +4317,22 @@ class SettingsWindow(ctk.CTkToplevel):
         CFG["close_to_tray"] = bool(self.chk_tray.get())
         CFG["autostart_win"] = bool(self.chk_autostart.get())
         CFG["journal_enable"] = bool(self.chk_journal.get())
+        if hasattr(self, "chk_tr_enable"):
+            CFG["tr_enable"] = bool(self.chk_tr_enable.get())
+            CFG["tr_mode"] = self._tr_mode.get()
+            if CFG["tr_mode"] == "api":
+                snap = self._tr_cfg_snapshot()
+                CFG["tr_api_key"] = snap["tr_api_key"]
+                CFG["tr_base_url"] = snap.get("tr_base_url", "")
+                CFG["tr_model"] = snap.get("tr_model", "")
+                CFG["tr_lang_to"] = snap["tr_lang_to"]
+                CFG["tr_provider"] = snap["tr_provider"]
+            if hasattr(self, "cmb_tr_model"):
+                CFG["tr_local_model"] = self.cmb_tr_model.get()
+            if hasattr(self, "_tr_dev"):
+                CFG["tr_device"] = self._tr_dev.get()
+            if hasattr(self, "chk_tr_keep"):
+                CFG["tr_keep_model"] = bool(self.chk_tr_keep.get())
         _set_autostart(CFG["autostart_win"])
         if old_device != CFG["device_choice"]:
             dev_name = (
